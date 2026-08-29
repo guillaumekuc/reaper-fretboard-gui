@@ -52,7 +52,7 @@ function loop()
 
   update_mouse()             -- edge detection: mouse.down / .up / .held
   consumed = false           -- click-routing flag for this frame
-  handle_keys(c)             -- digits=frets, arrows=string/step, R/T/L, [ ]=grid, ctrl+Z/Y
+  handle_keys(c)             -- digits, arrows(+ctrl=bar), Q chord, R/T/L, [ ]=grid, ctrl+Z/Y
   poll_live_input()          -- fold hardware MIDI into live_notes
 
   take = get_take()          -- the MIDI editor's active take, or nil
@@ -96,12 +96,13 @@ is the lowest string; `pitch_at(s, f) = S.str_note[s] + f`.
 - **initialised** from the edit cursor (`GetCursorPosition` → `timeToQN`),
   snapped to the step length.
 - **advanced** by `step_len_qn(take)` after each inserted note — unless Shift
-  is held (chord entry: insert here, don't move).
-- **nudged** by `step_cursor(±1)` on the **Left / Right arrow keys** — move
-  one step with no note (Right = leave a rest, Left = back up). These keys
-  exist because clicking the fretboard window pulls focus off the MIDI
-  editor, so its own arrow-key cursor moves stop reaching it. Backspace
-  (remove last note + step back) is separate.
+  is held or **chord mode** is on (stack at the cursor, don't move).
+- **nudged** by `step_cursor(±1)` on **← / →** (one step, no note; → = rest)
+  and `step_bar(±1)` on **Ctrl+← / →** (to the previous / next barline; the
+  first Ctrl+← from mid-bar snaps to the current bar's start). These exist
+  because the window takes focus off the MIDI editor. Backspace (remove last
+  note + step back) is separate. Ctrl is read from `mouse.cap & 4` (it tracks
+  modifier keys even with no mouse button down).
 - **re-synced** to the edit cursor whenever the user moves it: each frame,
   `sync_cursor_from_edit` compares `GetCursorPosition()` to
   `last_cursor_time` (the value the script itself last wrote) and, if they
@@ -135,7 +136,8 @@ pinned length — the panel's `STEP 1/n (note len | grid)` label says which.
 
 - `delete_last()` (Backspace) — pop `history`, `find_note` by
   `(pitch, chan, sppq≈)`, delete, restore `cursor_qn` to `prev`.
-- `step_cursor(±1)` (arrows, and `R` for +1) — move a step, insert nothing.
+- `step_cursor(±1)` (←/→, `R` = +1) / `step_bar(±1)` (Ctrl+←/→) — move without
+  inserting.
 - `tie_extend()` (`T`) — `find_note` the last note, `MIDI_SetNote` its end to
   `end + step`, advance the cursor. Repeatable.
 
@@ -148,6 +150,18 @@ arrives within 0.8 s of the previous one and `prev*10 + d ≤ num_frets`, it
 wrapped in one undo block via `undo_suppress`. Otherwise the new digit starts
 a fresh note. `digit_pending` is cleared by any non-digit key, a board click,
 or the timeout.
+
+### Chord mode (`Q`)
+
+Dorico-style. `chord_mode` (a plain local, not persisted) makes every insert —
+typed or clicked — pass `advance = false`, so pitches stack at `cursor_qn`.
+`Q` toggles it; toggling **off** while `chord_dirty` (a note was added) does one
+`step_cursor(1)` so you land past the chord ready to continue. `→` still works
+mid-chord to move between chord positions without leaving the mode. Preview in
+chord mode is polyphonic (`preview_notes` is a set) and rings until you leave
+the position (`step_cursor` / `step_bar` / `Q` / any non-note key call
+`preview_off`); outside chord mode a preview self-clears 0.3 s after the last
+note or mouse-release.
 
 ---
 
@@ -222,10 +236,12 @@ mismatch used to shift the right edge inward).
 - **Focus steals editor keys** – clicking the fretboard window takes key
   focus, so the MIDI editor's own arrow / Backspace / letter shortcuts stop
   working while you're on the fretboard. `handle_keys` re-implements the ones
-  that matter (digits, arrows, `R T L [ ] - =`, Backspace, Ctrl+Z/Y, Space)
-  against that take. Arrow keycodes are the ASCII-of-the-name magic constants
-  in `K` (`LEFT = 1818584692` = `"left"`, `UP = 30064` = `"up"`, …), not
-  plain codes.
+  that matter (digits, arrows, Ctrl+arrows, `Q R T L [ ] - =`, Backspace,
+  Ctrl+Z/Y, Space) against that take. Arrow keycodes are the ASCII-of-the-name
+  magic constants in `K` (`LEFT = 1818584692` = `"left"`, `UP = 30064` =
+  `"up"`, …), not plain codes. Ctrl for the Ctrl+arrow bar jumps comes from
+  `mouse.cap & 4`, since `gfx.getchar` gives the same code for `←` and
+  `Ctrl+←`.
 - **Keyboard layout** – digit and symbol keys come through as whatever
   character the OS produces. On layouts where the number row is shifted
   (AZERTY etc.) you hold Shift to type fret digits, and `[ ] - =` may be
@@ -256,10 +272,14 @@ mismatch used to shift the right edge inward).
   also desync `history` from the take — Backspace then finds nothing and
   harmlessly pops.
 - **No polyphonic mouse** – one pointer. Chord entry is Shift+click.
+- **`step_bar` measure indexing** – assumes `TimeMap2_timeToBeats`' measures
+  out and `TimeMap2_beatsToTime`' `measuresIn` use the same base. If bar jumps
+  land one bar off, that's the mismatch.
 - **Runtime status** – loads and passes a stubbed-API frame harness (`gfx` /
-  `reaper` mocked; simulated clicks, key sequences incl. typed frets, the
-  2-digit amend, tie, let-ring trim, `[`/`]` → `SetMIDIEditorGrid`, undo
-  forwarding, rest). Not yet run inside REAPER.
+  `reaper` mocked; simulated clicks + key sequences: typed frets & 2-digit
+  amend, tie, let-ring trim, `[`/`]`→`SetMIDIEditorGrid`, undo forwarding,
+  rest, `Q` chord stacking + commit, Ctrl+arrow bar jumps). Not yet run inside
+  REAPER.
 
 ---
 

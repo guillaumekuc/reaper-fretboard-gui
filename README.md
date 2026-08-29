@@ -37,6 +37,8 @@ re-mapped):
 | `0`–`9` | fret on the **active string** (type `1` then `2` fast = fret 12) |
 | `↑` / `↓` | choose the active string |
 | `←` / `→` | move the step cursor back / forward one step (`→` = rest) |
+| `Ctrl+←` / `Ctrl+→` | jump to the previous / next bar |
+| `Q` | chord mode (Dorico-style): notes stack at the cursor; `Q` again commits and moves on |
 | `R` | rest (same as `→`) |
 | `T` | tie: lengthen the last note by one step and advance |
 | `[` `]` (or `-` `=`) | halve / double the MIDI editor grid |
@@ -89,12 +91,13 @@ string 1 to transpose to any root.
 
 ## Status
 
-**ReaScript `v0.7.0` (this branch)** — fretboard window with Guitar-Pro-style
-typed entry (pick string, type fret) into the active MIDI editor take: step /
-chord / rest / tie / let-ring / undo-redo. Step length is REAPER's own (the
-MIDI editor grid), nudged by `[` `]`. Previews audibly; lights up notes at the
-cursor + live keyboard input + playback. Passes a stubbed-API frame harness;
-not yet run inside REAPER. Rough edges in `docs/REASCRIPT.md §7`.
+**ReaScript `v0.8.0` (this branch)** — fretboard window with Guitar-Pro-style
+typed entry (pick string, type fret) into the active MIDI editor take:
+step / Dorico-style chord mode (`Q`) / rest / tie / let-ring / undo-redo /
+bar navigation. Step length is REAPER's own (the MIDI editor grid), nudged by
+`[` `]`. Previews audibly; lights up notes at the cursor + live keyboard input
++ playback. Passes a stubbed-API frame harness; not yet run inside REAPER.
+Rough edges in `docs/REASCRIPT.md §7`.
 
 **JSFX `v0.3.0` (`master`)** — all settings in the plugin GUI, drag-to-retune,
 greyscale UI. Live MIDI thru + click-to-send only (no editor insertion).

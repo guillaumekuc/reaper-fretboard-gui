@@ -1,6 +1,6 @@
 --[[
   Fretboard MIDI Controller  (ReaScript / Lua)
-  version 0.7.0
+  version 0.8.0
 
   A guitar-fretboard window that inserts notes into the take open in the active
   MIDI editor, Guitar-Pro-style: pick a string, type a fret, it writes the note
@@ -14,6 +14,9 @@
     0-9            fret on the active string  (type 1 then 2 quickly = 12)
     up / down      choose the active string
     left / right   move the step cursor back / forward one step (right = rest)
+    ctrl+left/right jump to the previous / next bar
+    Q              chord mode (Dorico-style): notes stack at the cursor without
+                   advancing; press Q again to commit the chord and move on
     R              rest (advance one step, insert nothing)
     T              tie: lengthen the last note by one step and advance
     [  ]  (- =)    halve / double the MIDI editor grid (the single source for
@@ -126,10 +129,12 @@ local cursor_qn
 local last_cursor_time
 local history = {}          -- { take, sppq, pitch, chan, prev } stack
 local ring_prev = {}        -- [string] -> last let-ring note {take, sppq, pitch, chan}
-local preview_pitch
+local preview_notes = {}    -- pitch -> true, notes currently sounding as preview
 local last_take
 local undo_suppress = false
 local digit_pending, digit_time = nil, 0
+local chord_mode  = false   -- Dorico-style: pitches stack at the cursor, no advance (Q)
+local chord_dirty = false   -- a note was added in the current chord
 
 local function get_take()
   local he = reaper.MIDIEditor_GetActive()
@@ -178,16 +183,18 @@ local function find_note(take, sppq, pitch, chan)
 end
 
 local function preview_off()
-  if preview_pitch then
-    reaper.StuffMIDIMessage(0, 0x80 + (S.chan - 1), preview_pitch, 0)
-    preview_pitch = nil
+  for p in pairs(preview_notes) do
+    reaper.StuffMIDIMessage(0, 0x80 + (S.chan - 1), p, 0)
   end
+  preview_notes = {}
 end
 
+local preview_time = 0
 local function preview_on(p)
-  preview_off()
+  if not chord_mode then preview_off() end   -- chord mode: let them ring together
   reaper.StuffMIDIMessage(0, 0x90 + (S.chan - 1), p, S.vel)
-  preview_pitch = p
+  preview_notes[p] = true
+  preview_time = reaper.time_precise()
 end
 
 local function set_cursor(qn)
@@ -260,7 +267,24 @@ local function step_cursor(dir)
   local take = get_take()
   if not take then return end
   if not cursor_qn then sync_cursor_from_edit(take) end
+  preview_off()
+  chord_dirty = false
   set_cursor(cursor_qn + dir * step_len_qn(take))
+end
+
+-- jump the cursor to the start of the next/previous bar (Ctrl + left/right)
+local function step_bar(dir)
+  local take = get_take()
+  if not take then return end
+  if not cursor_qn then sync_cursor_from_edit(take) end
+  preview_off()
+  chord_dirty = false
+  local t = reaper.TimeMap2_QNToTime(0, cursor_qn)
+  local beats, meas = reaper.TimeMap2_timeToBeats(0, t)
+  local target = meas + dir
+  if dir < 0 and beats > 1e-4 then target = meas end   -- first Ctrl+Left snaps to this bar's start
+  target = math.max(0, target)
+  set_cursor(reaper.TimeMap2_timeToQN(0, reaper.TimeMap2_beatsToTime(0, 0, target)))
 end
 
 local function tie_extend()
@@ -288,7 +312,7 @@ local function type_fret(d)
       reaper.Undo_BeginBlock()
       undo_suppress = true
       delete_last()
-      insert_note(pitch_at(S.active_string, combined), true, S.active_string)
+      insert_note(pitch_at(S.active_string, combined), not chord_mode, S.active_string)
       undo_suppress = false
       reaper.Undo_EndBlock("Fretboard: fret " .. combined, -1)
       preview_on(pitch_at(S.active_string, combined))
@@ -298,7 +322,8 @@ local function type_fret(d)
   end
   local p = pitch_at(S.active_string, d)
   preview_on(p)
-  insert_note(p, true, S.active_string)
+  insert_note(p, not chord_mode, S.active_string)
+  if chord_mode then chord_dirty = true end
   digit_pending = (d >= 1 and d <= math.floor(S.num_frets / 10)) and d or nil
   digit_time = now
 end
@@ -506,7 +531,7 @@ local function draw_board(at_cursor, playing)
 
     for f = 0, S.num_frets do
       local p = pitch_at(s, f)
-      local prev = (p == preview_pitch)
+      local prev = preview_notes[p]
       local live = live_notes[p]
       local play = playing[p]
       local here = at_cursor[p]
@@ -536,8 +561,8 @@ local function monitor_hint(take)
   return "   (arm + monitor the track to hear previews)"
 end
 
-local HINTS = "0-9 fret   up/down string   left/right step   R rest   T tie   "
-           .. "[ ] editor grid   L let-ring   bksp del   ctrl+Z/Y undo/redo"
+local HINTS = "0-9 fret   up/down string   left/right step   ctrl+l/r bar   Q chord   "
+           .. "R rest   T tie   [ ] grid   L let-ring   bksp del   ctrl+Z/Y undo"
 
 local function draw_panel(take)
   gfx.set(0.13, 0.13, 0.15); gfx.rect(0, 0, gfx.w, PANEL_H)
@@ -575,7 +600,11 @@ local function draw_panel(take)
   if btn(379, 60, 52, bh, "Played", S.name_mode == 1) then S.name_mode = 1 end
   if btn(434, 60, 42, bh, "All",    S.name_mode == 2) then S.name_mode = 2 end
   if btn(500, 60, 74, bh, "Let ring", S.let_ring == 1) then S.let_ring = 1 - S.let_ring; ring_prev = {} end
-  caption(590, 63, "STEP " .. (take and step_label(take) or "-") .. "   ([ ] = editor grid)")
+  if btn(580, 60, 66, bh, "Chord", chord_mode) then
+    if chord_mode and chord_dirty then step_cursor(1) end
+    chord_mode = not chord_mode; chord_dirty = false; preview_off()
+  end
+  caption(660, 63, "STEP " .. (take and step_label(take) or "-"))
 
   gfx.set(0.44, 0.44, 0.47); gfx.x = 10; gfx.y = 84; gfx.drawstr(HINTS)
 
@@ -647,8 +676,10 @@ local function handle_board_click()
   if p < 0 or p > 127 then return end
   S.active_string = bs
   digit_pending = nil
+  local advance = not chord_mode and (mouse.cap & 8) == 0   -- shift or chord mode: stack
   preview_on(p)
-  insert_note(p, (mouse.cap & 8) == 0, bs)
+  insert_note(p, advance, bs)
+  if not advance then chord_dirty = true end
 end
 
 local K = { LEFT = 1818584692, RIGHT = 1919379572, UP = 30064, DOWN = 1685026670,
@@ -657,9 +688,20 @@ local K = { LEFT = 1818584692, RIGHT = 1919379572, UP = 30064, DOWN = 1685026670
 local function handle_keys(c)
   if c >= 48 and c <= 57 then type_fret(c - 48); return end
   digit_pending = nil
+
+  if c == string.byte("q") or c == string.byte("Q") then      -- Dorico-style chord mode
+    if chord_mode and chord_dirty then step_cursor(1) end     -- commit the chord, move on
+    chord_mode = not chord_mode
+    chord_dirty = false
+    preview_off()
+    return
+  end
+
+  if c ~= 0 then preview_off() end   -- a real non-note key ends any ringing preview
+  local ctrl = (mouse.cap & 4) ~= 0
   if c == K.BKSP or c == K.DEL then delete_last()
-  elseif c == K.RIGHT then step_cursor(1)
-  elseif c == K.LEFT  then step_cursor(-1)
+  elseif c == K.RIGHT then if ctrl then step_bar(1)  else step_cursor(1)  end
+  elseif c == K.LEFT  then if ctrl then step_bar(-1) else step_cursor(-1) end
   elseif c == K.UP    then S.active_string = clamp(S.active_string + 1, 1, S.num_strings)
   elseif c == K.DOWN  then S.active_string = clamp(S.active_string - 1, 1, S.num_strings)
   elseif c == string.byte("r") or c == string.byte("R") then step_cursor(1)
@@ -716,7 +758,10 @@ local function loop()
   handle_string_drag()
   handle_board_click()
 
-  if not mouse.held then preview_off() end
+  if not chord_mode and not mouse.held
+     and next(preview_notes) and reaper.time_precise() - preview_time > 0.3 then
+    preview_off()
+  end
 
   gfx.update()
   reaper.defer(loop)
