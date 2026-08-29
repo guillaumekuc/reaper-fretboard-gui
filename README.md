@@ -26,16 +26,30 @@ if you like).
 ## Use (ReaScript)
 
 Open a MIDI item in the MIDI editor, place the edit cursor, run the script.
-Click a fret → the note is inserted at the cursor and the cursor advances by
-**the MIDI editor's own step length** (its Length / Grid setting — the same
-value REAPER uses for keyboard step input). The click also previews audibly.
+Type a fret (or click one) → the note is inserted at the cursor, previewed
+audibly, and the cursor advances by one step.
 
-- **← / →** – move the step cursor back / forward one step without inserting
-  (→ leaves a rest). These are here because clicking the window takes focus
-  off the MIDI editor, so its own arrow keys stop working.
-- **Shift+click** – insert without advancing (chord entry).
-- **Backspace** – remove the last inserted note and step back.
-- **Space** – transport play/stop.
+**Keyboard** (the window takes focus off the MIDI editor, so these are
+re-mapped):
+
+| key | action |
+|---|---|
+| `0`–`9` | fret on the **active string** (type `1` then `2` fast = fret 12) |
+| `↑` / `↓` | choose the active string |
+| `←` / `→` | move the step cursor back / forward one step (`→` = rest) |
+| `R` | rest (same as `→`) |
+| `T` | tie: lengthen the last note by one step and advance |
+| `[` `]` (or `-` `=`) | step length shorter / longer |
+| `.` / `,` | dotted / triplet step |
+| `\` | step length: follow the MIDI editor again |
+| `L` | "let ring" — notes sustain until that string is replayed |
+| `Backspace` | remove the last note and step back |
+| `Ctrl+Z` / `Ctrl+Y` | undo / redo |
+| `Space` | transport play/stop |
+| `Shift`+click | insert without advancing (chord entry) |
+
+- **Step length** follows the MIDI editor's own Length / Grid setting until
+  you press `[` `]` `.` `,`; `\` hands it back.
 - Move the edit cursor in the MIDI editor to reposition; the script follows.
 - The board lights up: notes at the cursor (dim), notes you play on a MIDI
   keyboard (bright), notes under the play cursor during playback (bright).
@@ -76,11 +90,12 @@ string 1 to transpose to any root.
 
 ## Status
 
-**ReaScript `v0.5.0` (this branch)** — fretboard window that inserts notes
-into the active MIDI editor take (step / chord entry) using REAPER's own step
-length, previews audibly, and lights up notes at the cursor + live keyboard
-input + playback. Passes a stubbed-API frame harness; not yet run inside
-REAPER. Rough edges in `docs/REASCRIPT.md §7`.
+**ReaScript `v0.6.0` (this branch)** — fretboard window with Guitar-Pro-style
+typed entry (pick string, type fret) into the active MIDI editor take: step /
+chord / rest / tie, dotted & triplet, let-ring, undo/redo, all following
+REAPER's own step length by default. Previews audibly; lights up notes at the
+cursor + live keyboard input + playback. Passes a stubbed-API frame harness;
+not yet run inside REAPER. Rough edges in `docs/REASCRIPT.md §7`.
 
 **JSFX `v0.3.0` (`master`)** — all settings in the plugin GUI, drag-to-retune,
 greyscale UI. Live MIDI thru + click-to-send only (no editor insertion).

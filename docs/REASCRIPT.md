@@ -30,7 +30,8 @@ instead of `midisend`, `ExtState` instead of hidden sliders.
 | MIDI out           | `midisend` (live thru)       | `MIDI_InsertNote` into editor take  |
 | Preview sound      | pass-through                 | `StuffMIDIMessage` to VKB           |
 | Visualise          | count live note-ons          | take notes at cursor + `MIDI_GetRecentInputEvent` |
-| Step length        | n/a                          | the MIDI editor's own (`MIDI_GetGrid`) |
+| Note entry         | click only                   | Guitar-Pro-style: pick string, type fret |
+| Step length        | n/a                          | the MIDI editor's own (`MIDI_GetGrid`), overridable |
 | State persistence  | hidden slider values         | `reaper.SetExtState(..., persist)`  |
 | Threading          | `@gfx`/`@block` split        | single-threaded                     |
 
@@ -51,7 +52,7 @@ function loop()
 
   update_mouse()             -- edge detection: mouse.down / .up / .held
   consumed = false           -- click-routing flag for this frame
-  handle_keys(c)             -- arrows = step cursor, bksp = remove last, space = transport
+  handle_keys(c)             -- digits=frets, arrows=string/step, R/T/L, [ ] . , \, ctrl+Z/Y
   poll_live_input()          -- fold hardware MIDI into live_notes
 
   take = get_take()          -- the MIDI editor's active take, or nil
@@ -83,8 +84,8 @@ is the lowest string; `pitch_at(s, f) = S.str_note[s] + f`.
   build from `S.str_note[1]` as the root; the **ROOT** buttons (E2 = 40,
   C2 = 36) and dragging string 1 both just set that and re-apply.
 - `S` is loaded from / saved to `ExtState` section `GK_FretboardController`
-  (`str_note` is stored comma-joined). Numbers are floored on save so the
-  steppers never show `6.0`.
+  (a fixed key list; `str_note` comma-joined). `save_state` keeps integers
+  integer and rounds fractions to 6 dp. `active_string` is *not* persisted.
 
 ---
 
@@ -107,22 +108,46 @@ is the lowest string; `pitch_at(s, f) = S.str_note[s] + f`.
   differ, adopts the user's position. So: click in the MIDI editor to
   reposition, then keep entering from there.
 
-**Step length is REAPER's own, not ours.** `step_len_qn(take)` = the MIDI
-editor's note-length setting, or its grid if that is "follow grid" — exactly
-`MIDI_GetGrid`'s `noteLen`/`grid` returns, the same values REAPER uses for
-keyboard step recording. There is no length control in this GUI; set it with
-the MIDI editor's Length / Grid dropdowns.
+### Step length
 
-`insert_note(pitch, advance)`:
-1. `MIDI_GetPPQPosFromProjQN` for start and start+step,
-2. `MIDI_InsertNote(take, sel=false, mut=false, …, chan = S.chan-1, pitch, S.vel)`,
-   wrapped in `Undo_BeginBlock`/`EndBlock` so Ctrl+Z removes one note,
+`step_len_qn(take)` returns:
+
+- if `S.step_base > 0` (the user touched a step key) → `S.step_base` × 1.5
+  (dotted) × 2/3 (triplet);
+- otherwise → the MIDI editor's own note-length / grid (`editor_step_qn` =
+  `MIDI_GetGrid`), i.e. exactly what REAPER's keyboard step recording uses.
+
+`[` / `]` (also `-` / `=`) halve / double `S.step_base`, seeding it from the
+editor value on first press (`ensure_step_base`); `.` and `,` toggle dotted /
+triplet; `\` clears all three back to "follow editor". So it defaults to
+REAPER's setting and only diverges when you ask it to.
+
+### insert / delete / tie / rest
+
+`insert_note(pitch, advance, string_idx)`:
+1. start / end PPQ from `cursor_qn` and `cursor_qn + step`,
+2. `MIDI_InsertNote(…, chan = S.chan-1, pitch, S.vel)` (+ `MIDI_Sort`), in an
+   `Undo_BeginBlock`/`EndBlock` pair unless `undo_suppress` is set,
 3. push `{take, sppq, pitch, chan, prev}` onto `history`,
-4. if advancing, bump `cursor_qn` and `SetEditCurPos`.
+4. if `S.let_ring`, stretch the end and trim the previous note on that string
+   (§5),
+5. if `advance`, `set_cursor(cursor_qn + step)`.
 
-`delete_last()` (Backspace) pops `history`, finds the matching note in the
-take by `(pitch, chan, sppq≈)`, deletes it, and restores `cursor_qn` to the
-entry's `prev`.
+- `delete_last()` (Backspace) — pop `history`, `find_note` by
+  `(pitch, chan, sppq≈)`, delete, restore `cursor_qn` to `prev`.
+- `step_cursor(±1)` (arrows, and `R` for +1) — move a step, insert nothing.
+- `tie_extend()` (`T`) — `find_note` the last note, `MIDI_SetNote` its end to
+  `end + step`, advance the cursor. Repeatable.
+
+### Typed fret entry (`type_fret`)
+
+`0`–`9` insert `pitch_at(S.active_string, digit)` and advance; **↑/↓** pick
+`S.active_string` (also set by a board click). Two-digit frets: if a digit
+arrives within 0.8 s of the previous one and `prev*10 + d ≤ num_frets`, it
+**amends** — `delete_last()` then re-inserts at the combined fret, the pair
+wrapped in one undo block via `undo_suppress`. Otherwise the new digit starts
+a fresh note. `digit_pending` is cleared by any non-digit key, a board click,
+or the timeout.
 
 ---
 
@@ -150,6 +175,17 @@ entry's `prev`.
      arrowing through the take reveals each chord.
   `scan_context` is throttled to every 6th frame unless playing.
 
+### Let ring (`L`)
+
+MIDI has no "let ring", so it's modelled as **per-string voices**, like a real
+guitar's 6 strings: `ring_prev[string]` holds the last note entered on each
+string while let-ring is on. On the next insert on that string, the previous
+note's end is pushed back (`MIDI_SetNote`) to the new note's start, and the
+new note is given a long tail (`min(max(step×6, 2), 4)` QN, ~ up to a bar).
+Notes on *different* strings overlap and ring together; a note on the *same*
+string cuts its predecessor. Turning let-ring off just stops the trimming;
+existing tails stay. `ring_prev` is cleared on every toggle.
+
 ---
 
 ## 6. Coordinate system & widgets
@@ -173,42 +209,42 @@ string-label drag → fretboard).
 
 ## 7. Known limitations & gotchas
 
-- **`&` precedence in Lua** – `a & b == c` parses as `a & (b == c)`. All
-  bit tests are parenthesised: `(GetPlayState() & 1) == 1`. Watch this when
-  editing.
-- **Lua 5.4** (REAPER 7) – `//`, `&`, `~`, integer/float distinction. The
-  code floors on `ExtState` save so no `%d`-format surprises.
+- **Focus steals editor keys** – clicking the fretboard window takes key
+  focus, so the MIDI editor's own arrow / Backspace / letter shortcuts stop
+  working while you're on the fretboard. `handle_keys` re-implements the ones
+  that matter (digits, arrows, `R T L [ ] . , \`, Backspace, Ctrl+Z/Y, Space)
+  against that take. Arrow keycodes are the ASCII-of-the-name magic constants
+  in `K` (`LEFT = 1818584692` = `"left"`, `UP = 30064` = `"up"`, …), not
+  plain codes.
+- **Keyboard layout** – digit and symbol keys come through as whatever
+  character the OS produces. On layouts where the number row is shifted
+  (AZERTY etc.) you hold Shift to type fret digits, and `[ ] \ , .` may be
+  elsewhere or need AltGr. A numpad (NumLock on) always yields `0`–`9`.
 - **Preview needs a monitored track** – `StuffMIDIMessage` mode 0 → the
   script `SetOnlyTrackSelected`s the take's track so the VKB routes there, but
-  you still hear nothing unless that track is armed + input-monitoring. The
-  status line flags this. (Same requirement as REAPER's own keyboard step
-  input.) Selecting the track is a side effect worth knowing about.
+  you hear nothing unless that track is armed + input-monitoring (same as
+  REAPER's keyboard step input). The status line flags this. Selecting the
+  track is a side effect worth knowing about.
 - **`MIDI_GetRecentInputEvent` is REAPER 7+** – guarded by `HAS_INPUT_POLL`;
-  on older builds the live-input highlight silently does nothing. It sees
-  hardware input only, not the piano roll's own mouse-preview.
-- **Focus steals editor keys** – clicking the fretboard window makes it the
-  key focus, so the MIDI editor's own arrow/Backspace/etc. stop working while
-  you're on the fretboard. Only the keys `handle_keys` explicitly re-maps
-  (arrows, Backspace, Space) are covered. Arrow keycodes are the big magic
-  constants `KEY_LEFT = 1818584692`, `KEY_RIGHT = 1919379572` (`gfx.getchar`
-  values, not ASCII).
-- **`&` precedence in Lua** – `a & b == c` parses as `a & (b == c)`. All bit
-  tests are parenthesised: `(GetPlayState() & 1) == 1`. Watch this when
-  editing.
-- **Lua 5.4** (REAPER 7) – `//`, `&`, `~`, integer/float distinction. The
-  code floors on `ExtState` save so no `%d`-format surprises.
-- **Editor refresh** – after `MIDI_InsertNote` + `MIDI_Sort` the editor
-  redraws on its own next paint. If a note ever seems to lag a frame, add an
-  explicit `MIDIEditor_OnCommand` refresh.
-- **One undo point per note** – deliberate (Ctrl+Z peels notes one at a
-  time), but it fills the undo history fast during long entry.
-- **`history` holds take references** – validated with `ValidatePtr2` before
-  use, but closing the item mid-session orphans older entries (they no-op).
-- **No polyphonic mouse** – still one pointer. Chord entry is Shift+click
-  (insert without advancing), not simultaneous notes.
-- **Runtime status** – loads and passes a stubbed-API frame harness
-  (`gfx`/`reaper` mocked; simulated clicks, keys, and a live note-on/off).
-  Not yet run inside REAPER.
+  older builds silently skip the live-input highlight. Hardware input only,
+  not the piano roll's own mouse-preview.
+- **`&` precedence in Lua** – `a & b == c` parses as `a & (b == c)`. Bit
+  tests are parenthesised: `(GetPlayState() & 1) == 1`.
+- **Lua 5.4** (REAPER 7) – `//`, `&`, integer/float. `ExtState` save keeps
+  integers integer and rounds fractions (`step_base`) to 6 dp.
+- **Two-digit fret amend = 2 undo points** – the first digit's insert is its
+  own undo block; the amend (`delete` + re-`insert`) is a second. Ctrl+Z peels
+  them one at a time.
+- **`let ring` heuristic** – the ring tail length (`min(max(step×6,2),4)` QN)
+  is a guess; a note that's never replayed on its string just rings that long.
+- **`history` / `ring_prev` hold take refs** – `ValidatePtr2`-checked before
+  use; a closed item orphans old entries (they no-op). A global Ctrl+Z can
+  also desync `history` from the take — Backspace then finds nothing and
+  harmlessly pops.
+- **No polyphonic mouse** – one pointer. Chord entry is Shift+click.
+- **Runtime status** – loads and passes a stubbed-API frame harness (`gfx` /
+  `reaper` mocked; simulated clicks, key sequences incl. typed frets, tie,
+  let-ring, step keys, and a live note-on/off). Not yet run inside REAPER.
 
 ---
 
@@ -217,7 +253,9 @@ string-label drag → fretboard).
 | Want to… | Touch |
 |----------|-------|
 | Add a tuning preset | `TUNINGS` (rule presets are automatic) |
-| Insert chords from one click | collect pitches, insert all at `cursor_qn`, advance once |
+| Transpose the last note | `Shift`+↑/↓ in `handle_keys` → `find_note` + `MIDI_SetNote` pitch ±1 / ±12 |
+| Palm-mute / dead-note modes | a flag that shortens `eppq` + drops `S.vel` in `insert_note` |
+| Real chord entry from the keyboard | a modifier that makes digits not advance; `handle_board_click` already does it for Shift+click |
 | Use the editor's active channel instead of `S.chan` | `MIDIEditor_GetSetting_int(hwnd, "default_note_chan")` in `insert_note` |
 | Honour editor grid swing | `MIDI_GetGrid` returns swing; fold into `step_len_qn` |
 | Toolbar toggle state (highlight while open) | `SetToggleCommandState` / `RefreshToolbar` around `loop`/`on_exit` |

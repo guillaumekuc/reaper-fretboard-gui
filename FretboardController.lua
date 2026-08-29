@@ -1,23 +1,30 @@
 --[[
   Fretboard MIDI Controller  (ReaScript / Lua)
-  version 0.5.0
+  version 0.6.0
 
-  A guitar-fretboard window that inserts notes straight into the take open in
-  the active MIDI editor, step-entry style: each click writes a note at a
-  cursor and advances it by the MIDI editor's own step length (grid / note
-  length). It previews clicks audibly and lights up:
-    - notes at the current step position (dim)
-    - live MIDI coming from your hardware input (bright)
-    - notes under the play cursor during playback (bright)
+  A guitar-fretboard window that inserts notes into the take open in the active
+  MIDI editor, Guitar-Pro-style: pick a string, type a fret, it writes the note
+  and advances by the step length. It previews audibly and lights up notes at
+  the cursor, live hardware-MIDI input, and notes under the play cursor.
 
   Run it as an action (Actions > Load ReaScript...). Open a MIDI item in the
-  MIDI editor, place the edit cursor, then click the fretboard.
-    - shift+click   insert without advancing (chord entry)
-    - left / right  move the step cursor back / forward one step (right = rest)
-    - backspace     remove the last inserted note and step back
-    - space         transport play/stop
-  Arrow keys are here because clicking the window takes focus off the MIDI
-  editor, so its own arrow-key cursor moves stop working.
+  MIDI editor, place the edit cursor, then type or click.
+
+  Keys (the window steals focus from the MIDI editor, so these are re-mapped):
+    0-9            fret on the active string  (type 1 then 2 quickly = 12)
+    up / down      choose the active string
+    left / right   move the step cursor back / forward one step (right = rest)
+    R              rest (advance one step, insert nothing)
+    T              tie: lengthen the last note by one step and advance
+    [  ]           step length: shorter / longer   (also -  = )
+    .              dotted step on/off
+    ,              triplet step on/off
+    \              step length: follow the MIDI editor again
+    L              "let ring" on/off  (notes sustain until the string is replayed)
+    backspace      remove the last inserted note and step back
+    ctrl+Z / Y     undo / redo
+    space          transport play/stop
+    shift+click    insert without advancing (chord entry)
 
   See docs/REASCRIPT.md for the architecture.
 ]]--
@@ -30,7 +37,6 @@ local HAS_INPUT_POLL = reaper.MIDI_GetRecentInputEvent ~= nil
 
 local NAMES = { "C","C#","D","D#","E","F","F#","G","G#","A","A#","B" }
 
--- index 1 == "Custom"; rule is nil (custom), "std", or a semitone interval
 local TUNINGS = {
   { name = "Custom",   rule = nil   },
   { name = "Standard", rule = "std" },
@@ -48,15 +54,20 @@ local function octave(n) return math.floor(n / 12) - 1 end
 -- ============================================================= state =====
 
 local S = {
-  num_strings = 6,
-  num_frets   = 22,
-  tuning      = 1,     -- 0..#TUNINGS-1  (0 == Custom)
-  inlay       = 2,     -- 0 none / 1 standard / 2 capsule
-  name_mode   = 1,     -- 0 off / 1 played / 2 all
-  chan        = 1,     -- 1..16
-  vel         = 100,
-  panel_open  = 1,
-  str_note    = { 40, 45, 50, 55, 59, 64, 35, 30, 25 },
+  num_strings   = 6,
+  num_frets     = 22,
+  tuning        = 1,
+  inlay         = 2,
+  name_mode     = 1,
+  chan          = 1,
+  vel           = 100,
+  panel_open    = 1,
+  str_note      = { 40, 45, 50, 55, 59, 64, 35, 30, 25 },
+  active_string = 3,      -- not persisted
+  step_base     = 0,      -- QN; 0 = follow the MIDI editor
+  dotted        = 0,
+  triplet       = 0,
+  let_ring      = 0,
 }
 
 local function pitch_at(s, f) return S.str_note[s] + f end   -- s: 1 = lowest string
@@ -78,13 +89,15 @@ end
 
 local function save_state()
   local function set(k, v)
-    if type(v) == "number" then v = math.floor(v) end
+    if type(v) == "number" then
+      v = (v == math.floor(v)) and math.floor(v) or math.floor(v * 1e6 + 0.5) / 1e6
+    end
     reaper.SetExtState(SECT, k, tostring(v), true)
   end
-  set("num_strings", S.num_strings) set("num_frets", S.num_frets)
-  set("tuning", S.tuning)           set("inlay", S.inlay)
-  set("name_mode", S.name_mode)     set("chan", S.chan)
-  set("vel", S.vel)                 set("panel_open", S.panel_open)
+  for _, k in ipairs({ "num_strings","num_frets","tuning","inlay","name_mode",
+                       "chan","vel","panel_open","step_base","dotted","triplet","let_ring" }) do
+    set(k, S[k])
+  end
   set("str_note", table.concat(S.str_note, ","))
 end
 
@@ -93,14 +106,10 @@ local function load_state()
     local v = reaper.GetExtState(SECT, k)
     return v ~= "" and tonumber(v) or d
   end
-  S.num_strings = num("num_strings", S.num_strings)
-  S.num_frets   = num("num_frets", S.num_frets)
-  S.tuning      = num("tuning", S.tuning)
-  S.inlay       = num("inlay", S.inlay)
-  S.name_mode   = num("name_mode", S.name_mode)
-  S.chan        = num("chan", S.chan)
-  S.vel         = num("vel", S.vel)
-  S.panel_open  = num("panel_open", S.panel_open)
+  for _, k in ipairs({ "num_strings","num_frets","tuning","inlay","name_mode",
+                       "chan","vel","panel_open","step_base","dotted","triplet","let_ring" }) do
+    S[k] = num(k, S[k])
+  end
   local sn = reaper.GetExtState(SECT, "str_note")
   if sn ~= "" then
     local t = {}
@@ -110,15 +119,19 @@ local function load_state()
   for i = 1, MAX_STRINGS do S.str_note[i] = S.str_note[i] or (25 + i * 3) end
   S.num_strings = clamp(math.floor(S.num_strings), 3, MAX_STRINGS)
   S.num_frets   = clamp(math.floor(S.num_frets), 5, 30)
+  S.active_string = clamp(math.floor(S.num_strings / 2) + 1, 1, S.num_strings)
 end
 
 -- ========================================================= midi i/o ======
 
-local cursor_qn        -- step cursor, project quarter-notes (nil = uninitialised)
-local last_cursor_time -- edit-cursor time we last wrote, to detect the user moving it
-local history = {}     -- { take, sppq, pitch, chan, prev_qn } stack, for Backspace
+local cursor_qn
+local last_cursor_time
+local history = {}          -- { take, sppq, pitch, chan, prev } stack
+local ring_prev = {}        -- [string] -> last let-ring note {take, sppq, pitch, chan}
 local preview_pitch
-local last_take        -- to notice the MIDI editor target changing
+local last_take
+local undo_suppress = false
+local digit_pending, digit_time = nil, 0
 
 local function get_take()
   local he = reaper.MIDIEditor_GetActive()
@@ -128,25 +141,48 @@ local function get_take()
   return nil
 end
 
--- the MIDI editor's own step length: its note-length setting, or the grid
-local function step_len_qn(take)
-  local grid, _, notelen = reaper.MIDI_GetGrid(take)
-  if notelen and notelen > 0 then return notelen end
-  return (grid and grid > 0) and grid or 0.25
-end
-
 local function track_of(take)
   local item = reaper.GetMediaItemTake_Item(take)
   return item and reaper.GetMediaItem_Track(item) or nil
 end
 
-local function sync_cursor_from_edit(take)
-  local t = reaper.GetCursorPosition()
-  if not last_cursor_time or math.abs(t - last_cursor_time) > 1e-6 then
-    local qn = reaper.TimeMap2_timeToQN(0, t)
-    local g  = step_len_qn(take)
-    cursor_qn = math.floor(qn / g + 0.5) * g          -- snap to the step grid
-    last_cursor_time = reaper.TimeMap2_QNToTime(0, cursor_qn)
+local function editor_step_qn(take)
+  local grid, _, notelen = reaper.MIDI_GetGrid(take)
+  if notelen and notelen > 0 then return notelen end
+  return (grid and grid > 0) and grid or 1
+end
+
+-- effective step, in QN
+local function step_len_qn(take)
+  if S.step_base and S.step_base > 0 then
+    local b = S.step_base
+    if S.dotted  == 1 then b = b * 1.5 end
+    if S.triplet == 1 then b = b * (2 / 3) end
+    return b
+  end
+  return editor_step_qn(take)
+end
+
+local function ensure_step_base(take)
+  if not (S.step_base and S.step_base > 0) then
+    S.step_base = editor_step_qn(take)
+  end
+end
+
+local function step_label(take)
+  if not (S.step_base and S.step_base > 0) then
+    local q = editor_step_qn(take)
+    return string.format("1/%d (editor)", math.max(1, math.floor(4 / q + 0.5)))
+  end
+  local denom = math.max(1, math.floor(4 / S.step_base + 0.5))
+  return "1/" .. denom .. (S.dotted == 1 and " dot" or "") .. (S.triplet == 1 and " trip" or "")
+end
+
+local function find_note(take, sppq, pitch, chan)
+  local _, n = reaper.MIDI_CountEvts(take)
+  for i = n - 1, 0, -1 do
+    local ok, _, _, s, e, c, p = reaper.MIDI_GetNote(take, i)
+    if ok and p == pitch and c == chan and math.abs(s - sppq) < 1 then return i, s, e end
   end
 end
 
@@ -163,7 +199,23 @@ local function preview_on(p)
   preview_pitch = p
 end
 
-local function insert_note(pitch, advance)
+local function set_cursor(qn)
+  cursor_qn = math.max(0, qn)
+  last_cursor_time = reaper.TimeMap2_QNToTime(0, cursor_qn)
+  reaper.SetEditCurPos(last_cursor_time, false, false)
+end
+
+local function sync_cursor_from_edit(take)
+  local t = reaper.GetCursorPosition()
+  if not last_cursor_time or math.abs(t - last_cursor_time) > 1e-6 then
+    local qn = reaper.TimeMap2_timeToQN(0, t)
+    local g  = step_len_qn(take)
+    cursor_qn = math.floor(qn / g + 0.5) * g
+    last_cursor_time = reaper.TimeMap2_QNToTime(0, cursor_qn)
+  end
+end
+
+local function insert_note(pitch, advance, string_idx)
   local take = get_take()
   if not take then return false end
   if not cursor_qn then sync_cursor_from_edit(take) end
@@ -171,16 +223,29 @@ local function insert_note(pitch, advance)
   local prev = cursor_qn
   local sppq = reaper.MIDI_GetPPQPosFromProjQN(take, cursor_qn)
   local eppq = reaper.MIDI_GetPPQPosFromProjQN(take, cursor_qn + step)
-  reaper.Undo_BeginBlock()
+
+  if S.let_ring == 1 and string_idx then
+    local tail = math.min(math.max(step * 6, 2), 4)          -- ring up to a bar
+    eppq = reaper.MIDI_GetPPQPosFromProjQN(take, cursor_qn + tail)
+    local pr = ring_prev[string_idx]
+    if pr and reaper.ValidatePtr2(0, pr.take, "MediaItem_Take*") then
+      local i2 = find_note(pr.take, pr.sppq, pr.pitch, pr.chan)
+      if i2 then reaper.MIDI_SetNote(pr.take, i2, nil, nil, nil, sppq, nil, nil, nil, false) end
+    end
+  end
+
+  if not undo_suppress then reaper.Undo_BeginBlock() end
   reaper.MIDI_InsertNote(take, false, false, sppq, eppq, S.chan - 1, pitch, S.vel, false)
   reaper.MIDI_Sort(take)
-  reaper.Undo_EndBlock("Fretboard: insert " .. note_name(pitch) .. octave(pitch), -1)
-  history[#history + 1] = { take = take, sppq = sppq, pitch = pitch, chan = S.chan - 1, prev = prev }
-  if advance then
-    cursor_qn = cursor_qn + step
-    last_cursor_time = reaper.TimeMap2_QNToTime(0, cursor_qn)
-    reaper.SetEditCurPos(last_cursor_time, false, false)
+  if not undo_suppress then
+    reaper.Undo_EndBlock("Fretboard: insert " .. note_name(pitch) .. octave(pitch), -1)
   end
+
+  history[#history + 1] = { take = take, sppq = sppq, pitch = pitch, chan = S.chan - 1, prev = prev }
+  if S.let_ring == 1 and string_idx then
+    ring_prev[string_idx] = { take = take, sppq = sppq, pitch = pitch, chan = S.chan - 1 }
+  end
+  if advance then set_cursor(cursor_qn + step) end
   return true
 end
 
@@ -189,34 +254,65 @@ local function delete_last()
   if not h then return end
   history[#history] = nil
   if reaper.ValidatePtr2(0, h.take, "MediaItem_Take*") then
-    local _, notes = reaper.MIDI_CountEvts(h.take)
-    for i = notes - 1, 0, -1 do
-      local ok, _, _, sppq, _, chan, pitch = reaper.MIDI_GetNote(h.take, i)
-      if ok and pitch == h.pitch and chan == h.chan and math.abs(sppq - h.sppq) < 1 then
-        reaper.Undo_BeginBlock()
-        reaper.MIDI_DeleteNote(h.take, i)
-        reaper.MIDI_Sort(h.take)
-        reaper.Undo_EndBlock("Fretboard: remove note", -1)
-        break
-      end
+    local idx = find_note(h.take, h.sppq, h.pitch, h.chan)
+    if idx then
+      if not undo_suppress then reaper.Undo_BeginBlock() end
+      reaper.MIDI_DeleteNote(h.take, idx)
+      reaper.MIDI_Sort(h.take)
+      if not undo_suppress then reaper.Undo_EndBlock("Fretboard: remove note", -1) end
     end
   end
-  cursor_qn = h.prev
-  last_cursor_time = reaper.TimeMap2_QNToTime(0, cursor_qn)
-  reaper.SetEditCurPos(last_cursor_time, false, false)
+  set_cursor(h.prev)
 end
 
--- move the step cursor by dir * one step, inserting nothing (dir = +1 rest / -1 back)
 local function step_cursor(dir)
   local take = get_take()
   if not take then return end
   if not cursor_qn then sync_cursor_from_edit(take) end
-  cursor_qn = math.max(0, cursor_qn + dir * step_len_qn(take))
-  last_cursor_time = reaper.TimeMap2_QNToTime(0, cursor_qn)
-  reaper.SetEditCurPos(last_cursor_time, false, false)
+  set_cursor(cursor_qn + dir * step_len_qn(take))
 end
 
--- notes in the take that occupy the current step slot / the play cursor
+local function tie_extend()
+  local take = get_take()
+  local h = history[#history]
+  if not take or not h then return end
+  local idx, _, e = find_note(take, h.sppq, h.pitch, h.chan)
+  if not idx then return end
+  local step  = step_len_qn(take)
+  local e_qn  = reaper.MIDI_GetProjQNFromPPQPos(take, e)
+  local new_e = reaper.MIDI_GetPPQPosFromProjQN(take, e_qn + step)
+  reaper.Undo_BeginBlock()
+  reaper.MIDI_SetNote(take, idx, nil, nil, nil, new_e, nil, nil, nil, false)
+  reaper.MIDI_Sort(take)
+  reaper.Undo_EndBlock("Fretboard: tie", -1)
+  set_cursor((cursor_qn or 0) + step)
+end
+
+local function type_fret(d)
+  if d > S.num_frets then return end
+  local now = reaper.time_precise()
+  if digit_pending and (now - digit_time) < 0.8 then
+    local combined = digit_pending * 10 + d
+    if combined <= S.num_frets then
+      reaper.Undo_BeginBlock()
+      undo_suppress = true
+      delete_last()
+      insert_note(pitch_at(S.active_string, combined), true, S.active_string)
+      undo_suppress = false
+      reaper.Undo_EndBlock("Fretboard: fret " .. combined, -1)
+      preview_on(pitch_at(S.active_string, combined))
+      digit_pending, digit_time = nil, now
+      return
+    end
+  end
+  local p = pitch_at(S.active_string, d)
+  preview_on(p)
+  insert_note(p, true, S.active_string)
+  digit_pending = (d >= 1 and d <= math.floor(S.num_frets / 10)) and d or nil
+  digit_time = now
+end
+
+-- notes in the take at the step slot / play cursor
 local function scan_context(take)
   local at_cursor, playing = {}, {}
   if not take then return at_cursor, playing end
@@ -240,7 +336,7 @@ local function scan_context(take)
   return at_cursor, playing
 end
 
--- live MIDI arriving at any hardware input (REAPER 7+)
+-- live MIDI from any hardware input (REAPER 7+)
 local live_notes = {}
 local last_input_seq = 0
 
@@ -248,10 +344,9 @@ local function poll_live_input()
   if not HAS_INPUT_POLL then return end
   local seq0 = reaper.MIDI_GetRecentInputEvent(0)
   if not seq0 or seq0 == 0 then return end
-  if seq0 < last_input_seq then last_input_seq = 0 end   -- history reset
+  if seq0 < last_input_seq then last_input_seq = 0 end
   if seq0 == last_input_seq then return end
-  local fresh = {}
-  local i = 0
+  local fresh, i = {}, 0
   while i < 64 do
     local seq, buf = reaper.MIDI_GetRecentInputEvent(i)
     if not seq or seq == 0 or seq <= last_input_seq then break end
@@ -259,14 +354,14 @@ local function poll_live_input()
     i = i + 1
   end
   last_input_seq = seq0
-  for j = #fresh, 1, -1 do                       -- apply oldest-first
+  for j = #fresh, 1, -1 do
     local b = fresh[j]
     if b and #b >= 3 then
       local st, d1, d2 = b:byte(1), b:byte(2), b:byte(3)
       local hi = st & 0xF0
       if hi == 0x90 and d2 > 0 then live_notes[d1] = true
       elseif hi == 0x80 or (hi == 0x90 and d2 == 0) then live_notes[d1] = nil
-      elseif hi == 0xB0 and d1 == 123 then live_notes = {} end   -- all-notes-off
+      elseif hi == 0xB0 and d1 == 123 then live_notes = {} end
     end
   end
 end
@@ -324,7 +419,7 @@ end
 -- ============================================================ drawing ====
 
 local L, R, T, B, boardw, boardh, fret_sp, str_sp, nr, ir, header_h
-local PANEL_H = 116
+local PANEL_H = 128
 local drag_s, drag_y0, drag_n0 = -1, 0, 0
 
 local function str_y(s)  return gfx.h - B - (s - 1) * str_sp end
@@ -346,7 +441,6 @@ local function draw_board(at_cursor, playing)
   gfx.set(0.11, 0.11, 0.12); gfx.rect(0, 0, gfx.w, gfx.h)
   gfx.set(0.16, 0.16, 0.17); gfx.rect(L, T, boardw, boardh)
 
-  -- inlays
   if S.inlay == 1 then
     local midy = (str_y(1) + str_y(S.num_strings)) * 0.5
     gfx.set(0.29, 0.29, 0.30)
@@ -381,7 +475,6 @@ local function draw_board(at_cursor, playing)
     end
   end
 
-  -- frets + numbers
   for f = 0, S.num_frets do
     local g = (f == 0) and 0.90 or 0.42
     gfx.set(g, g, f == 0 and 0.90 or 0.44)
@@ -394,13 +487,20 @@ local function draw_board(at_cursor, playing)
     end
   end
 
-  -- strings, open-note labels, markers
   for s = 1, S.num_strings do
     local y = str_y(s)
-    gfx.set(0.55, 0.55, 0.56); gfx.line(L, y, gfx.w - R, y)
+    local act = (s == S.active_string)
+    gfx.set(act and 0.78 or 0.55, act and 0.78 or 0.55, act and 0.80 or 0.56)
+    gfx.line(L, y, gfx.w - R, y)
+    if act then
+      gfx.set(0.85, 0.85, 0.55)
+      gfx.triangle(L - 34, y - 4, L - 34, y + 4, L - 28, y)
+    end
 
     local op = pitch_at(s, 0)
-    if s == drag_s then gfx.set(0.98, 0.98, 1.0) else gfx.set(0.72, 0.72, 0.74) end
+    if s == drag_s then gfx.set(0.98, 0.98, 1.0)
+    elseif act then gfx.set(0.90, 0.90, 0.80)
+    else gfx.set(0.72, 0.72, 0.74) end
     gfx.x = 4; gfx.y = y - 7; gfx.drawstr(note_name(op) .. octave(op))
 
     for f = 0, S.num_frets do
@@ -435,6 +535,9 @@ local function monitor_hint(take)
   return "   (arm + monitor the track to hear previews)"
 end
 
+local HINTS = "0-9 fret   up/down string   left/right step   R rest   T tie   "
+           .. "[ ] . , step len   \\ follow   L let-ring   bksp del   ctrl+Z undo"
+
 local function draw_panel(take)
   gfx.set(0.13, 0.13, 0.15); gfx.rect(0, 0, gfx.w, PANEL_H)
   gfx.set(0.22, 0.22, 0.25); gfx.line(0, PANEL_H, gfx.w, PANEL_H)
@@ -467,34 +570,36 @@ local function draw_panel(take)
   if btn(127, 60, 58, bh, "Standard", S.inlay == 1) then S.inlay = 1 end
   if btn(188, 60, 58, bh, "Capsule",  S.inlay == 2) then S.inlay = 2 end
   caption(280, 63, "NAMES")
-  if btn(330, 60, 50, bh, "Off",    S.name_mode == 0) then S.name_mode = 0 end
-  if btn(383, 60, 50, bh, "Played", S.name_mode == 1) then S.name_mode = 1 end
-  if btn(436, 60, 50, bh, "All",    S.name_mode == 2) then S.name_mode = 2 end
+  if btn(330, 60, 46, bh, "Off",    S.name_mode == 0) then S.name_mode = 0 end
+  if btn(379, 60, 52, bh, "Played", S.name_mode == 1) then S.name_mode = 1 end
+  if btn(434, 60, 42, bh, "All",    S.name_mode == 2) then S.name_mode = 2 end
+  if btn(500, 60, 74, bh, "Let ring", S.let_ring == 1) then S.let_ring = 1 - S.let_ring; ring_prev = {} end
+  caption(590, 63, "STEP " .. (take and step_label(take) or "-"))
 
-  -- status line
+  gfx.set(0.44, 0.44, 0.47); gfx.x = 10; gfx.y = 84; gfx.drawstr(HINTS)
+
   gfx.x = 10; gfx.y = PANEL_H - 20
   if take then
     gfx.set(0.55, 0.62, 0.55)
     local _, nm = reaper.GetSetMediaItemTakeInfo_String(take, "P_NAME", "", false)
-    local where, len = "", ""
+    local where = ""
     if last_cursor_time then
       local beats, meas = reaper.TimeMap2_timeToBeats(0, last_cursor_time)
       where = string.format("  @ bar %d beat %.2f", meas + 1, beats + 1)
     end
-    local q = step_len_qn(take)
-    len = string.format("  step %.3f QN", q)
-    gfx.drawstr("Insert into: " .. (nm ~= "" and nm or "MIDI editor take")
-      .. where .. len .. "     arrows = step / rest   shift+click = chord   bksp = remove last"
-      .. monitor_hint(take))
+    local ap = pitch_at(S.active_string, 0)
+    gfx.drawstr(string.format("Insert into: %s%s   string %d (%s%d open)%s",
+      nm ~= "" and nm or "MIDI editor take", where,
+      S.active_string, note_name(ap), octave(ap), monitor_hint(take)))
   else
     gfx.set(0.60, 0.50, 0.45)
-    gfx.drawstr("No MIDI editor open - clicks only preview. Open a MIDI item in the MIDI editor.")
+    gfx.drawstr("No MIDI editor open - clicks/keys only preview. Open a MIDI item in the MIDI editor.")
   end
 end
 
 local function draw_header(take)
   gfx.set(0.40, 0.40, 0.43); gfx.x = 8; gfx.y = 6
-  gfx.drawstr(take and "Fretboard - click to insert  .  arrows = step/rest  .  shift+click = chord  .  bksp = remove"
+  gfx.drawstr(take and "Fretboard - type 0-9 for frets, up/down picks string, arrows step  (open settings for all keys)"
                     or "Fretboard - open a MIDI item in the MIDI editor to insert notes")
   gfx.set(0.22, 0.22, 0.25); gfx.line(0, header_h, gfx.w, header_h)
 end
@@ -539,17 +644,37 @@ local function handle_board_click()
   local f = mouse.x < L and 0 or clamp(math.ceil((mouse.x - L) / fret_sp), 1, S.num_frets)
   local p = pitch_at(bs, f)
   if p < 0 or p > 127 then return end
+  S.active_string = bs
+  digit_pending = nil
   preview_on(p)
-  insert_note(p, (mouse.cap & 8) == 0)   -- shift held -> chord (no advance)
+  insert_note(p, (mouse.cap & 8) == 0, bs)
 end
 
-local KEY_LEFT, KEY_RIGHT = 1818584692, 1919379572
+local K = { LEFT = 1818584692, RIGHT = 1919379572, UP = 30064, DOWN = 1685026670,
+            BKSP = 8, DEL = 6579564, SPACE = 32, CZ = 26, CY = 25 }
 
 local function handle_keys(c)
-  if c == 8 or c == 6579564 then delete_last()          -- backspace / delete: remove last note
-  elseif c == KEY_RIGHT then step_cursor(1)             -- advance one step (leave a rest)
-  elseif c == KEY_LEFT  then step_cursor(-1)            -- go back one step
-  elseif c == 32 then reaper.Main_OnCommand(40044, 0)   -- space: transport
+  if c >= 48 and c <= 57 then type_fret(c - 48); return end
+  digit_pending = nil
+  local take = get_take()
+  if c == K.BKSP or c == K.DEL then delete_last()
+  elseif c == K.RIGHT then step_cursor(1)
+  elseif c == K.LEFT  then step_cursor(-1)
+  elseif c == K.UP    then S.active_string = clamp(S.active_string + 1, 1, S.num_strings)
+  elseif c == K.DOWN  then S.active_string = clamp(S.active_string - 1, 1, S.num_strings)
+  elseif c == string.byte("r") or c == string.byte("R") then step_cursor(1)
+  elseif c == string.byte("t") or c == string.byte("T") then tie_extend()
+  elseif c == string.byte("l") or c == string.byte("L") then S.let_ring = 1 - S.let_ring; ring_prev = {}
+  elseif c == string.byte("[") or c == string.byte("-") then
+    if take then ensure_step_base(take); S.step_base = clamp(S.step_base / 2, 1/64, 4) end
+  elseif c == string.byte("]") or c == string.byte("=") then
+    if take then ensure_step_base(take); S.step_base = clamp(S.step_base * 2, 1/64, 4) end
+  elseif c == string.byte(".") then if take then ensure_step_base(take); S.dotted = 1 - S.dotted end
+  elseif c == string.byte(",") then if take then ensure_step_base(take); S.triplet = 1 - S.triplet end
+  elseif c == string.byte("\\") then S.step_base, S.dotted, S.triplet = 0, 0, 0
+  elseif c == K.CZ then reaper.Main_OnCommand(40029, 0)
+  elseif c == K.CY then reaper.Main_OnCommand(40030, 0)
+  elseif c == K.SPACE then reaper.Main_OnCommand(40044, 0)
   end
 end
 
@@ -564,6 +689,7 @@ local function loop()
 
   update_mouse()
   consumed = false
+  if digit_pending and (reaper.time_precise() - digit_time) > 0.8 then digit_pending = nil end
   handle_keys(c)
   poll_live_input()
 
@@ -572,12 +698,13 @@ local function loop()
     if take ~= last_take then
       last_take = take
       local tr = track_of(take)
-      if tr then reaper.SetOnlyTrackSelected(tr) end   -- route VKB previews here
+      if tr then reaper.SetOnlyTrackSelected(tr) end
     end
     sync_cursor_from_edit(take)
   else
     cursor_qn, last_take = nil, nil
   end
+  S.active_string = clamp(S.active_string, 1, S.num_strings)
 
   frame = frame + 1
   local playing = take and ((reaper.GetPlayState() & 1) == 1)
