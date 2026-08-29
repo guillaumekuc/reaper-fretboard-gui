@@ -99,14 +99,14 @@ string 1 to transpose to any root.
 
 ## Status
 
-**ReaScript `v0.9.1` (this branch)** — fretboard window with Guitar-Pro-style
+**ReaScript `v0.9.2` (this branch)** — fretboard window with Guitar-Pro-style
 typed entry (pick string, type fret) into the active MIDI editor take:
 Dorico-style chord mode (`Q`), rest, tie, let-ring, per-note undo/redo, bar
 navigation, and Dorico-style **decoupled grid vs note length** — both are
 REAPER's own MIDI-editor settings, changed in place. Grey "what's here" notes
 show per beat or per bar. Previews audibly; lights up cursor + live keyboard +
-playback. Passes a stubbed-API frame harness; not yet run inside REAPER. Rough
-edges in `docs/REASCRIPT.md §7`.
+playback. Passes a stubbed-API frame harness; not yet fully verified inside
+REAPER (the note-length setter API is unconfirmed — see `docs/REASCRIPT.md §7`).
 
 **JSFX `v0.3.0` (`master`)** — all settings in the plugin GUI, drag-to-retune,
 greyscale UI. Live MIDI thru + click-to-send only (no editor insertion).

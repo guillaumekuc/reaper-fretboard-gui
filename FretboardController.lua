@@ -1,6 +1,6 @@
 --[[
   Fretboard MIDI Controller  (ReaScript / Lua)
-  version 0.9.1
+  version 0.9.2
 
   A guitar-fretboard window that inserts notes into the take open in the active
   MIDI editor, Guitar-Pro-style: pick a string, type a fret, it writes the note
@@ -181,11 +181,18 @@ local function set_grid(take, mult)
   end
 end
 
--- [ / ] (and ctrl+up/down): the MIDI editor's note-length setting, directly
+-- [ / ] (and ctrl+up/down): the MIDI editor's note-length setting, directly.
+-- Falls back to changing the grid if this REAPER can't set the note length.
 local function set_note_len(take, hwnd, mult)
-  if not take or not hwnd or not reaper.MIDIEditor_SetSetting_int then return end
-  local want = clamp(step_len_qn(take) * mult, 1 / 64, 4)
-  reaper.MIDIEditor_SetSetting_int(hwnd, "default_note_len", math.floor(want * tpqn_of(take) + 0.5))
+  if not take then return end
+  local ok = false
+  if hwnd and reaper.MIDIEditor_SetSetting_int and reaper.MIDIEditor_GetSetting_int then
+    local before = reaper.MIDIEditor_GetSetting_int(hwnd, "default_note_len")
+    local want   = math.floor(clamp(step_len_qn(take) * mult, 1 / 64, 4) * tpqn_of(take) + 0.5)
+    reaper.MIDIEditor_SetSetting_int(hwnd, "default_note_len", want)
+    ok = reaper.MIDIEditor_GetSetting_int(hwnd, "default_note_len") ~= before
+  end
+  if not ok then set_grid(take, mult) end   -- no working note-length setter -> use the grid
 end
 
 local function as_frac(qn)
@@ -667,8 +674,12 @@ local function draw_panel(take)
 
   gfx.set(0.44, 0.44, 0.47); gfx.x = 10; gfx.y = 84; gfx.drawstr(HINTS)
   if reaper.time_precise() - last_key_time < 3 then      -- key diagnostic (last press)
-    gfx.set(0.55, 0.55, 0.40); gfx.x = gfx.w - 150; gfx.y = 84
+    gfx.set(0.62, 0.58, 0.35); gfx.x = gfx.w - 260; gfx.y = 84
     gfx.drawstr("key: " .. last_key)
+  end
+  if not reaper.MIDIEditor_SetSetting_int then
+    gfx.set(0.60, 0.50, 0.40); gfx.x = gfx.w - 400; gfx.y = 84
+    gfx.drawstr("(this REAPER: [ ] also = grid)")
   end
 
   gfx.x = 10; gfx.y = PANEL_H - 20
@@ -763,6 +774,7 @@ local function handle_keys(c)
   if c ~= 0 then preview_off() end   -- a real non-note key ends any ringing preview
   local ctrl = (mouse.cap & 4) ~= 0
   local alt  = (mouse.cap & 16) ~= 0
+  if ctrl and alt then ctrl = false end   -- AltGr (US-Intl etc.) = Ctrl+Alt; treat as Alt
   local take, hwnd = get_take()
   if c == K.BKSP or c == K.DEL then delete_last()
   elseif c == K.RIGHT then if ctrl then step_bar(1)  else step_cursor(1)  end

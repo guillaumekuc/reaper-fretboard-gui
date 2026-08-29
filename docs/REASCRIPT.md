@@ -129,9 +129,15 @@ They're changed **in place** in REAPER:
 | `Alt+[` `Alt+]` or **Alt+↑/↓** | `set_grid(take, ×0.5/2)` | `SetMIDIEditorGrid(0, qn)` |
 
 The **arrow variants** exist because `[`/`]` don't survive every keyboard
-layout (on AZERTY `[` is `AltGr`+key, which also sets the Alt bit → it'd hit
-the grid branch). Ctrl/Alt+↑↓ deliver the arrow keycode plus a clean modifier
-every time. `Ctrl`/`Alt` are read from `mouse.cap & 4 / & 16`.
+layout. Also: on US-International / AZERTY the **right Alt is AltGr = LCtrl +
+RAlt**, so `handle_keys` does `if ctrl and alt then ctrl = false end` — an
+AltGr chord is treated as plain Alt (we use no Ctrl+Alt combos). `Ctrl`/`Alt`
+are read from `mouse.cap & 4 / & 16`.
+
+`set_note_len` **verifies its own effect**: it reads `default_note_len`,
+writes, reads again; if unchanged (this REAPER can't set it, or the API is
+missing) it falls back to `set_grid(mult)` so `[`/`]` still do something. The
+panel shows `(this REAPER: [ ] also = grid)` when the setter is absent.
 
 `tpqn_of(take)` derives ticks-per-quarter from the take, usually 960. Both
 clamp to `[1/64, 4]` QN. Dotted / triplet aren't reimplemented — use the MIDI
