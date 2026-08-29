@@ -1,6 +1,6 @@
 --[[
   Fretboard MIDI Controller  (ReaScript / Lua)
-  version 0.9.6-dbg
+  version 0.9.7-dbg
 
   A guitar-fretboard window that inserts notes into the take open in the active
   MIDI editor, Guitar-Pro-style: pick a string, type a fret, it writes the note
@@ -19,17 +19,18 @@
                    advancing; press Q again to commit the chord and move on
     R              rest: advance by one NOTE LENGTH, insert nothing
     T              tie: lengthen the last note by one note length and advance
-    , .            MIDI editor GRID finer / wider      (or the panel GRID +/- )
-    - =   ctrl+up/down   MIDI editor NOTE LENGTH shorter / longer  (panel NOTE +/- )
+    [  ]           MIDI editor NOTE LENGTH shorter / longer   (or panel NOTE +/- )
+    shift+[  shift+]   MIDI editor GRID finer / wider          (or panel GRID +/- )
     L              "let ring" on/off  (notes sustain until the string is replayed)
     backspace      remove the last inserted note and step back
     ctrl+Z / Y     undo / redo
     space          transport play/stop
     shift+click    insert without advancing (chord entry)
 
-  Grid and note length are REAPER's own MIDI-editor settings. The , . and - =
-  keys (and the panel GRID / NOTE +/- buttons) step through REAPER's own
-  "Grid: set to 1/N" and "Set length for next inserted note: 1/N" actions,
+  Grid and note length are REAPER's own MIDI-editor settings. The [ ] and
+  shift+[ shift+] keys (and the panel NOTE / GRID +/- buttons) step through
+  REAPER's own "Set length for next inserted note: 1/N" and "Grid: set to 1/N"
+  actions,
   which are discovered from the action list at startup (needs the SWS
   extension). Nothing is stored locally. Grid = caret movement & snap;
   note length = the length of inserted notes and how far a note advances the
@@ -676,7 +677,7 @@ local function monitor_hint(take)
 end
 
 local HINTS = "0-9 fret   up/down string   left/right grid-step   ctrl+l/r bar   Q chord   R rest   T tie   "
-           .. ", . = grid   - = = note len   L let-ring   ctrl+Z/Y undo    (or use the panel buttons)"
+           .. "[ ] note len   shift+[ ] grid   L let-ring   ctrl+Z/Y undo    (or the panel GRID / NOTE buttons)"
 
 local function draw_panel(take)
   gfx.set(0.13, 0.13, 0.15); gfx.rect(0, 0, gfx.w, PANEL_H)
@@ -846,19 +847,15 @@ local function handle_keys(c)
   if c == K.BKSP or c == K.DEL then delete_last()
   elseif c == K.RIGHT then if ctrl then step_bar(1)  else step_cursor(1)  end
   elseif c == K.LEFT  then if ctrl then step_bar(-1) else step_cursor(-1) end
-  elseif c == K.UP   then
-    if ctrl then set_note_len(take, hwnd, false)
-    else S.active_string = clamp(S.active_string + 1, 1, S.num_strings) end
-  elseif c == K.DOWN then
-    if ctrl then set_note_len(take, hwnd, true)
-    else S.active_string = clamp(S.active_string - 1, 1, S.num_strings) end
+  elseif c == K.UP   then S.active_string = clamp(S.active_string + 1, 1, S.num_strings)
+  elseif c == K.DOWN then S.active_string = clamp(S.active_string - 1, 1, S.num_strings)
   elseif c == string.byte("r") or c == string.byte("R") then step_cursor(1, "note")
   elseif c == string.byte("t") or c == string.byte("T") then tie_extend()
   elseif c == string.byte("l") or c == string.byte("L") then S.let_ring = 1 - S.let_ring; ring_prev = {}
-  elseif c == string.byte(",") or c == string.byte("<") then set_grid(take, hwnd, true)      -- grid finer
-  elseif c == string.byte(".") or c == string.byte(">") then set_grid(take, hwnd, false)     -- grid wider
-  elseif c == string.byte("-") or c == string.byte("_") then set_note_len(take, hwnd, true)   -- shorter note
-  elseif c == string.byte("=") or c == string.byte("+") then set_note_len(take, hwnd, false)  -- longer note
+  elseif c == string.byte("[") then set_note_len(take, hwnd, true)    -- note length shorter
+  elseif c == string.byte("]") then set_note_len(take, hwnd, false)   -- note length longer
+  elseif c == string.byte("{") then set_grid(take, hwnd, true)        -- shift+[  grid finer
+  elseif c == string.byte("}") then set_grid(take, hwnd, false)       -- shift+]  grid wider
   elseif c == K.CZ then reaper.Main_OnCommand(40029, 0)
   elseif c == K.CY then reaper.Main_OnCommand(40030, 0)
   elseif c == K.SPACE then reaper.Main_OnCommand(40044, 0)
@@ -872,7 +869,7 @@ local CTX_at_cursor, CTX_playing = {}, {}
 
 local function loop()
   local c = gfx.getchar()
-  if c < 0 or c == 27 then return end
+  if c < 0 then return end   -- window closed (Esc/ctrl+[ = 27 no longer closes it)
 
   update_mouse()
   consumed = false
