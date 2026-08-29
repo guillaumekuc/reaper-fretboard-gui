@@ -1,0 +1,442 @@
+desc:Fretboard MIDI Controller
+author:Guillaume Kuc
+version:0.3.0
+about:
+  Guitar fretboard GUI for REAPER that both visualises incoming MIDI and lets
+  you input MIDI by clicking the fretboard. All settings live in an on-canvas
+  panel that toggles away, so the plugin can show just the fretboard. Per-string
+  tuning (drag the note names), preset tunings that fill the strings, custom
+  string/fret counts and inlays (none / standard / "capsule").
+
+  All parameters are declared hidden ("-" prefix) so REAPER shows only the
+  custom GUI; they remain automatable and are used to persist state.
+
+// ---------------------------------------------------------------------------
+// Parameters (all hidden from REAPER's UI; edited via the @gfx panel)
+// ---------------------------------------------------------------------------
+slider1:settings_panel=1<0,1,1>-Settings panel open
+slider2:num_strings=6<3,9,1>-Strings
+slider3:num_frets=22<5,30,1>-Frets
+slider4:tuning_preset=1<0,6,1>-Tuning preset
+slider5:inlay_mode=2<0,2,1>-Inlays
+slider6:out_channel=1<1,16,1>-MIDI out channel
+slider7:out_velocity=100<1,127,1>-Click velocity
+slider8:name_mode=1<0,2,1>-Note names
+
+slider11:str1=40<12,108,1>-String 1
+slider12:str2=45<12,108,1>-String 2
+slider13:str3=50<12,108,1>-String 3
+slider14:str4=55<12,108,1>-String 4
+slider15:str5=59<12,108,1>-String 5
+slider16:str6=64<12,108,1>-String 6
+slider17:str7=35<12,108,1>-String 7
+slider18:str8=30<12,108,1>-String 8
+slider19:str9=25<12,108,1>-String 9
+
+in_pin:none
+out_pin:none
+
+// ---------------------------------------------------------------------------
+@init
+// ---------------------------------------------------------------------------
+MAX_STRINGS = 9;
+
+notestate = 0;                 // note-on counter per MIDI pitch (0..127), from incoming MIDI
+
+PEND_MAX = 64;
+pend   = 300;                  // outgoing event ring buffer (m1,m2,m3 triplets)
+pend_r = 0;
+pend_w = 0;
+
+str_note = 500;                // working per-string MIDI notes, index 0 = lowest string
+
+gui_note    = -1;              // pitch currently held by the mouse, -1 = none
+last_cap    = 0;
+last_preset = -1;              // force a preset apply on the first @slider
+drag_s      = -1;              // string whose note name is being dragged, -1 = none
+
+// mask of every parameter the @gfx code writes (for sliderchange)
+allmask = 1 + 2 + 4 + 8 + 16 + 32 + 64 + 128;
+i = 0; loop(MAX_STRINGS, allmask += (1 << (10 + i)); i += 1; );
+
+function clampv(v lo hi) ( min(max(v, lo), hi); );
+
+function push_event(m1 m2 m3) local(p) (
+  p = pend + pend_w * 3;
+  p[0] = m1; p[1] = m2; p[2] = m3;
+  pend_w = (pend_w + 1) % PEND_MAX;
+);
+
+function read_sliders() (
+  str_note[0] = str1; str_note[1] = str2; str_note[2] = str3;
+  str_note[3] = str4; str_note[4] = str5; str_note[5] = str6;
+  str_note[6] = str7; str_note[7] = str8; str_note[8] = str9;
+);
+function write_sliders() (
+  str1 = str_note[0]; str2 = str_note[1]; str3 = str_note[2];
+  str4 = str_note[3]; str5 = str_note[4]; str6 = str_note[5];
+  str7 = str_note[6]; str8 = str_note[7]; str9 = str_note[8];
+);
+
+// fill str_note[] from tuning_preset. Custom (0) leaves the fields alone.
+function apply_preset() local(i iv root) (
+  tuning_preset == 1 ? (               // Standard: 6-string EADGBE, count forced to 6
+    num_strings = 6;
+    str_note[0] = 40; str_note[1] = 45; str_note[2] = 50;
+    str_note[3] = 55; str_note[4] = 59; str_note[5] = 64;
+  ) : tuning_preset >= 2 ? (           // interval rules, from string 1 as the root
+    iv = tuning_preset == 2 ? 5 : tuning_preset == 3 ? 7 :
+         tuning_preset == 4 ? 4 : tuning_preset == 5 ? 3 : 6;
+    root = str_note[0];
+    i = 0; loop(MAX_STRINGS, str_note[i] = root + i * iv; i += 1; );
+  );
+  i = 0; loop(MAX_STRINGS, str_note[i] = clampv(str_note[i], 12, 108); i += 1; );
+);
+
+function pitch_at(s f) ( str_note[s] + f; );
+
+// writes pitch n's note name (no octave) into the global string #nm
+function note_name(n) local(nn) (
+  nn = n % 12;
+  nn == 0  ? strcpy(#nm, "C")  : nn == 1  ? strcpy(#nm, "C#") :
+  nn == 2  ? strcpy(#nm, "D")  : nn == 3  ? strcpy(#nm, "D#") :
+  nn == 4  ? strcpy(#nm, "E")  : nn == 5  ? strcpy(#nm, "F")  :
+  nn == 6  ? strcpy(#nm, "F#") : nn == 7  ? strcpy(#nm, "G")  :
+  nn == 8  ? strcpy(#nm, "G#") : nn == 9  ? strcpy(#nm, "A")  :
+  nn == 10 ? strcpy(#nm, "A#") : strcpy(#nm, "B");
+);
+
+// --- layout helpers (L/R/T/B, fret_sp, str_sp, gfx_* are set in @gfx) -------
+function str_y(s)  ( gfx_h - B - s * str_sp; );
+function fret_x(f) ( L + f * fret_sp; );
+function note_x(f) ( f <= 0 ? L - 24 : L + (f - 0.5) * fret_sp; );
+
+function nearest_string(my) local(s bs bd d) (
+  bs = 0; bd = 1000000; s = 0;
+  loop(num_strings,
+    d = abs(str_y(s) - my);
+    d < bd ? ( bd = d; bs = s; );
+    s += 1;
+  );
+  bs;
+);
+function fret_from_x(mx) local(f) (
+  mx < L ? 0 : ( f = ceil((mx - L) / fret_sp); min(max(f, 1), num_frets); );
+);
+
+// --- immediate-mode widgets (label text passed via the global string #lbl) --
+function ui_caption(lx ly) (
+  gfx_set(0.52, 0.52, 0.55, 1);
+  gfx_x = lx; gfx_y = ly;
+  gfx_drawstr(#lbl);
+);
+
+function ui_btn(bx by bw bh active) local(hit clk) (
+  hit = mouse_x >= bx && mouse_x <= bx + bw && mouse_y >= by && mouse_y <= by + bh;
+  active ? gfx_set(0.30, 0.30, 0.34, 1) :
+  hit    ? gfx_set(0.23, 0.23, 0.26, 1) : gfx_set(0.16, 0.16, 0.18, 1);
+  gfx_rect(bx, by, bw, bh);
+  gfx_set(0.38, 0.38, 0.42, 1);
+  gfx_line(bx, by, bx + bw, by);        gfx_line(bx, by + bh, bx + bw, by + bh);
+  gfx_line(bx, by, bx, by + bh);        gfx_line(bx + bw, by, bx + bw, by + bh);
+  active ? gfx_set(0.95, 0.95, 0.97, 1) : gfx_set(0.70, 0.70, 0.74, 1);
+  gfx_x = bx + 6; gfx_y = by + (bh - 8) * 0.5;
+  gfx_drawstr(#lbl);
+  clk = ui_click && hit;
+  clk ? consumed = 1;
+  clk;
+);
+
+// draws "caption [-] value [+]" starting at sx; returns the (possibly changed) value
+function ui_stepper(sx sy caplen val lo hi) local(nv bx) (
+  nv = val;
+  ui_caption(sx, sy + 4);
+  bx = sx + caplen;
+  strcpy(#lbl, "-"); ui_btn(bx, sy, 17, 16, 0) ? nv = max(lo, val - 1);
+  gfx_set(0.86, 0.86, 0.89, 1);
+  gfx_x = bx + 24; gfx_y = sy + 4; gfx_drawnumber(val, 0);
+  strcpy(#lbl, "+"); ui_btn(bx + 46, sy, 17, 16, 0) ? nv = min(hi, val + 1);
+  nv;
+);
+
+// ---------------------------------------------------------------------------
+@slider
+// ---------------------------------------------------------------------------
+num_frets   = clampv(num_frets, 5, 30);
+num_strings = clampv(num_strings, 3, MAX_STRINGS);
+
+read_sliders();
+i = 0; loop(MAX_STRINGS, str_note[i] = clampv(str_note[i], 12, 108); i += 1; );
+
+tuning_preset != last_preset ? ( apply_preset(); write_sliders(); );
+tuning_preset == 1 ? num_strings = 6;
+
+panel_open  = settings_panel;
+last_preset = tuning_preset;
+
+// ---------------------------------------------------------------------------
+@block
+// ---------------------------------------------------------------------------
+while (midirecv(mo, m1, m2, m3)) (
+  st = m1 & 0xF0;
+  (st == 0x90 && m3 > 0) ? (
+    notestate[m2] += 1;
+  ) : ((st == 0x80) || (st == 0x90 && m3 == 0)) ? (
+    notestate[m2] > 0 ? notestate[m2] -= 1;
+  );
+  midisend(mo, m1, m2, m3);
+);
+
+while (pend_r != pend_w) (
+  ep = pend + pend_r * 3;
+  midisend(0, ep[0], ep[1], ep[2]);
+  pend_r = (pend_r + 1) % PEND_MAX;
+);
+
+// ---------------------------------------------------------------------------
+@gfx 1000 300
+// ---------------------------------------------------------------------------
+gfx_setfont(1, "Arial", 14);
+
+dirty     = 0;
+ui_click  = (mouse_cap & 1) && !(last_cap & 1);
+mup       = !(mouse_cap & 1) && (last_cap & 1);
+consumed  = 0;
+
+panel_h  = 128;
+header_h = panel_open ? panel_h : 26;   // top strip: full panel, or just title + toggle button
+L = 46; R = 16; T = header_h + 24; B = 18;   // +24 leaves room for the fret-number row
+board_w = gfx_w - L - R;
+board_h = gfx_h - T - B;
+fret_sp = board_w / num_frets;
+str_sp  = num_strings > 1 ? board_h / (num_strings - 1) : board_h;
+nr      = max(4, min(11, min(fret_sp, str_sp) * 0.34));
+ir      = max(3, nr * 0.55);
+
+// background + board
+gfx_set(0.11, 0.11, 0.12, 1);  gfx_rect(0, 0, gfx_w, gfx_h);
+gfx_set(0.16, 0.16, 0.17, 1);  gfx_rect(L, T, board_w, board_h);
+
+// ---- inlays ----------------------------------------------------------
+inlay_mode == 1 ? (
+  midy = (str_y(0) + str_y(num_strings - 1)) * 0.5;
+  gfx_set(0.30, 0.30, 0.31, 1);
+  f = 1;
+  loop(num_frets,
+    m = f % 12;
+    (m == 3 || m == 5 || m == 7 || m == 9) ? gfx_circle(note_x(f), midy, ir, 1, 1) :
+    m == 0 ? (
+      gfx_circle(note_x(f), midy - str_sp * 0.6, ir, 1, 1);
+      gfx_circle(note_x(f), midy + str_sp * 0.6, ir, 1, 1);
+    );
+    f += 1;
+  );
+) : inlay_mode == 2 ? (
+  gfx_set(0.30, 0.30, 0.31, 1);
+  f = 1;
+  loop(num_frets,
+    s = 0;
+    while (
+      s < num_strings ? (
+        pc  = pitch_at(s, f) % 12;
+        pcu = s + 1 < num_strings ? pitch_at(s + 1, f) % 12 : -1;
+        is_target = pc == 0 || pc == 5;
+        cap = is_target && ((pc == 0 && pcu == 5) || (pc == 5 && pcu == 0));
+        cap ? (
+          cx = note_x(f); y0 = str_y(s); y1 = str_y(s + 1); rr = ir + 1;
+          gfx_rect(cx - rr, min(y0, y1), rr * 2, abs(y1 - y0));
+          gfx_circle(cx, y0, rr, 1, 1);
+          gfx_circle(cx, y1, rr, 1, 1);
+          s += 2;
+        ) : (
+          is_target ? gfx_circle(note_x(f), str_y(s), ir, 1, 1);
+          s += 1;
+        );
+        1;
+      ) : 0;
+    );
+    f += 1;
+  );
+);
+
+// ---- frets + numbers -----------------------------------------------
+f = 0;
+loop(num_frets + 1,
+  f == 0 ? gfx_set(0.90, 0.90, 0.90, 1) : gfx_set(0.42, 0.42, 0.44, 1);
+  x = fret_x(f);
+  gfx_line(x, T, x, gfx_h - B);
+  f == 0 ? gfx_line(x + 1, T, x + 1, gfx_h - B);
+  f > 0 ? (
+    gfx_set(0.45, 0.45, 0.47, 1);
+    gfx_x = note_x(f) - 6; gfx_y = T - 16;
+    gfx_drawnumber(f, 0);
+  );
+  f += 1;
+);
+
+// ---- strings + open-note labels + note markers -------------------
+s = 0;
+loop(num_strings,
+  y = str_y(s);
+  gfx_set(0.55, 0.55, 0.56, 1);
+  gfx_line(L, y, gfx_w - R, y);
+
+  op = pitch_at(s, 0);
+  note_name(op);
+  s == drag_s ? gfx_set(0.98, 0.98, 1.0, 1) : gfx_set(0.72, 0.72, 0.74, 1);
+  gfx_x = 4; gfx_y = y - 7;
+  gfx_drawstr(#nm); gfx_drawnumber(floor(op / 12) - 1, 0);
+
+  f = 0;
+  loop(num_frets + 1,
+    p = pitch_at(s, f);
+    active = p >= 0 && p < 128 ? notestate[p] : 0;
+    held = p == gui_note;
+    (active > 0 || held) ? (
+      held ? (
+        gfx_set(1.0, 1.0, 1.0, 1);      gfx_circle(note_x(f), y, nr + 1, 1, 1);
+        gfx_set(0.30, 0.30, 0.32, 1);   gfx_circle(note_x(f), y, nr + 1, 0, 1);
+      ) : (
+        gfx_set(0.86, 0.86, 0.88, 1);   gfx_circle(note_x(f), y, nr, 1, 1);
+        gfx_set(0.12, 0.12, 0.13, 1);   gfx_circle(note_x(f), y, nr, 0, 1);
+      );
+      name_mode > 0 ? (
+        note_name(p);
+        gfx_set(0.12, 0.12, 0.13, 1);
+        gfx_x = note_x(f) - 7; gfx_y = y - 6;
+        gfx_drawstr(#nm);
+      );
+    ) : name_mode == 2 && f > 0 ? (
+      note_name(p);
+      gfx_set(0.40, 0.40, 0.42, 1);
+      gfx_x = note_x(f) - 6; gfx_y = y - 6;
+      gfx_drawstr(#nm);
+    );
+    f += 1;
+  );
+  s += 1;
+);
+
+// ---- settings panel -------------------------------------------------
+panel_open ? (
+  gfx_set(0.13, 0.13, 0.15, 1);  gfx_rect(0, 0, gfx_w, panel_h);
+  gfx_set(0.30, 0.30, 0.33, 1);  gfx_line(0, panel_h, gfx_w, panel_h);
+
+  bw = 60; bh = 16; gp = 3; cx0 = 66;
+
+  // tuning presets
+  strcpy(#lbl, "TUNING"); ui_caption(10, 11);
+  strcpy(#lbl, "Custom");   ui_btn(cx0 + 0 * (bw + gp), 8, bw, bh, tuning_preset == 0) ? ( tuning_preset = 0; dirty = 1; );
+  strcpy(#lbl, "Standard"); ui_btn(cx0 + 1 * (bw + gp), 8, bw, bh, tuning_preset == 1) ? ( tuning_preset = 1; apply_preset(); dirty = 1; );
+  strcpy(#lbl, "4ths");     ui_btn(cx0 + 2 * (bw + gp), 8, bw, bh, tuning_preset == 2) ? ( tuning_preset = 2; apply_preset(); dirty = 1; );
+  strcpy(#lbl, "5ths");     ui_btn(cx0 + 3 * (bw + gp), 8, bw, bh, tuning_preset == 3) ? ( tuning_preset = 3; apply_preset(); dirty = 1; );
+  strcpy(#lbl, "Maj 3rds"); ui_btn(cx0 + 4 * (bw + gp), 8, bw, bh, tuning_preset == 4) ? ( tuning_preset = 4; apply_preset(); dirty = 1; );
+  strcpy(#lbl, "Min 3rds"); ui_btn(cx0 + 5 * (bw + gp), 8, bw, bh, tuning_preset == 5) ? ( tuning_preset = 5; apply_preset(); dirty = 1; );
+  strcpy(#lbl, "Tritone");  ui_btn(cx0 + 6 * (bw + gp), 8, bw, bh, tuning_preset == 6) ? ( tuning_preset = 6; apply_preset(); dirty = 1; );
+
+  // root note for the interval-rule presets
+  tuning_preset >= 2 ? (
+    rx = cx0 + 7 * (bw + gp) + 12;
+    strcpy(#lbl, "ROOT"); ui_caption(rx, 11);
+    strcpy(#lbl, "E2"); ui_btn(rx + 38, 8, 38, bh, str_note[0] == 40) ? ( str_note[0] = 40; apply_preset(); dirty = 1; );
+    strcpy(#lbl, "C2"); ui_btn(rx + 79, 8, 38, bh, str_note[0] == 36) ? ( str_note[0] = 36; apply_preset(); dirty = 1; );
+  );
+
+  // counts
+  strcpy(#lbl, "STRINGS");
+  nv = ui_stepper(10, 36, 56, num_strings, 3, 9);
+  nv != num_strings ? ( num_strings = nv; tuning_preset >= 1 ? apply_preset(); dirty = 1; );
+  strcpy(#lbl, "FRETS");
+  nv = ui_stepper(200, 36, 42, num_frets, 5, 30);
+  nv != num_frets ? ( num_frets = nv; dirty = 1; );
+
+  // inlays
+  strcpy(#lbl, "INLAYS"); ui_caption(10, 67);
+  strcpy(#lbl, "None");     ui_btn(66,  64, 58, bh, inlay_mode == 0) ? ( inlay_mode = 0; dirty = 1; );
+  strcpy(#lbl, "Standard"); ui_btn(127, 64, 58, bh, inlay_mode == 1) ? ( inlay_mode = 1; dirty = 1; );
+  strcpy(#lbl, "Capsule");  ui_btn(188, 64, 58, bh, inlay_mode == 2) ? ( inlay_mode = 2; dirty = 1; );
+
+  // note names
+  strcpy(#lbl, "NAMES"); ui_caption(280, 67);
+  strcpy(#lbl, "Off");    ui_btn(330, 64, 50, bh, name_mode == 0) ? ( name_mode = 0; dirty = 1; );
+  strcpy(#lbl, "Played"); ui_btn(383, 64, 50, bh, name_mode == 1) ? ( name_mode = 1; dirty = 1; );
+  strcpy(#lbl, "All");    ui_btn(436, 64, 50, bh, name_mode == 2) ? ( name_mode = 2; dirty = 1; );
+
+  // MIDI out
+  strcpy(#lbl, "MIDI CH");
+  nv = ui_stepper(10, 92, 56, out_channel, 1, 16);
+  nv != out_channel ? ( out_channel = nv; dirty = 1; );
+  strcpy(#lbl, "VELOCITY");
+  nv = ui_stepper(200, 92, 60, out_velocity, 1, 127);
+  nv != out_velocity ? ( out_velocity = nv; dirty = 1; );
+
+  gfx_set(0.45, 0.45, 0.48, 1);
+  gfx_x = 10; gfx_y = panel_h - 18;
+  gfx_drawstr("Drag a string's note name up / down to retune it.");
+) : (
+  gfx_set(0.40, 0.40, 0.43, 1);
+  gfx_x = 8; gfx_y = 6;
+  gfx_drawstr("Fretboard MIDI Controller");
+  gfx_set(0.22, 0.22, 0.25, 1);
+  gfx_line(0, header_h, gfx_w, header_h);
+);
+
+// settings toggle button (top-right)
+tbw = 68; tbh = 17; tbx = gfx_w - tbw - 6; tby = 4;
+panel_open ? strcpy(#lbl, "hide") : strcpy(#lbl, "settings");
+ui_btn(tbx, tby, tbw, tbh, panel_open) ? (
+  panel_open = panel_open ? 0 : 1;
+  settings_panel = panel_open;
+  dirty = 1;
+);
+
+// ---- string-name drag (retune) -----------------------------------
+s = 0;
+loop(num_strings,
+  y = str_y(s);
+  ui_click && !consumed && mouse_x >= 2 && mouse_x <= L - 6 && abs(mouse_y - y) <= max(6, str_sp * 0.4) ? (
+    drag_s = s; drag_y0 = mouse_y; drag_n0 = str_note[s]; consumed = 1;
+  );
+  s += 1;
+);
+drag_s >= 0 && (mouse_cap & 1) ? (
+  str_note[drag_s] = clampv(drag_n0 + floor((drag_y0 - mouse_y) / 7 + 0.5), 12, 108);
+  dirty = 1;
+);
+drag_s >= 0 && !(mouse_cap & 1) ? (
+  drag_s == 0 && tuning_preset >= 2 ? (
+    apply_preset();
+  ) : (
+    tuning_preset != 0 ? ( tuning_preset = 0; );
+  );
+  drag_s = -1;
+  dirty = 1;
+);
+
+// ---- fretboard click -> MIDI ------------------------------------
+ui_click && !consumed && mouse_y > T - 4 && mouse_y < gfx_h - B + 6 && mouse_x > L - 30 ? (
+  ns = nearest_string(mouse_y);
+  nf = fret_from_x(mouse_x);
+  p  = pitch_at(ns, nf);
+  p >= 0 && p < 128 ? (
+    gui_note >= 0 ? push_event(0x80 + (out_channel - 1), gui_note, 0);
+    gui_note = p;
+    push_event(0x90 + (out_channel - 1), p, out_velocity);
+  );
+);
+mup && gui_note >= 0 ? (
+  push_event(0x80 + (out_channel - 1), gui_note, 0);
+  gui_note = -1;
+);
+
+// ---- flush parameter changes ----------------------------------
+dirty ? (
+  num_strings = clampv(num_strings, 3, MAX_STRINGS);
+  num_frets   = clampv(num_frets, 5, 30);
+  tuning_preset == 1 ? num_strings = 6;
+  write_sliders();
+  sliderchange(allmask);
+  last_preset = tuning_preset;
+);
+
+last_cap = mouse_cap;
