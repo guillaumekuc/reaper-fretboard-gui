@@ -31,7 +31,7 @@ instead of `midisend`, `ExtState` instead of hidden sliders.
 | Preview sound      | pass-through                 | `StuffMIDIMessage` to VKB           |
 | Visualise          | count live note-ons          | take notes at cursor + `MIDI_GetRecentInputEvent` |
 | Note entry         | click only                   | Guitar-Pro-style: pick string, type fret |
-| Step length        | n/a                          | the MIDI editor's own (`MIDI_GetGrid`), overridable |
+| Step length        | n/a                          | the MIDI editor's own (`MIDI_GetGrid`); `[ ]` nudge its grid |
 | State persistence  | hidden slider values         | `reaper.SetExtState(..., persist)`  |
 | Threading          | `@gfx`/`@block` split        | single-threaded                     |
 
@@ -52,7 +52,7 @@ function loop()
 
   update_mouse()             -- edge detection: mouse.down / .up / .held
   consumed = false           -- click-routing flag for this frame
-  handle_keys(c)             -- digits=frets, arrows=string/step, R/T/L, [ ] . , \, ctrl+Z/Y
+  handle_keys(c)             -- digits=frets, arrows=string/step, R/T/L, [ ]=grid, ctrl+Z/Y
   poll_live_input()          -- fold hardware MIDI into live_notes
 
   take = get_take()          -- the MIDI editor's active take, or nil
@@ -108,19 +108,19 @@ is the lowest string; `pitch_at(s, f) = S.str_note[s] + f`.
   differ, adopts the user's position. So: click in the MIDI editor to
   reposition, then keep entering from there.
 
-### Step length
+### Step length — one source of truth
 
-`step_len_qn(take)` returns:
+`step_len_qn(take)` = **REAPER's own value, always**: `MIDI_GetGrid`'s note
+length if set, otherwise its grid — exactly what keyboard step recording uses.
+There is no local step state.
 
-- if `S.step_base > 0` (the user touched a step key) → `S.step_base` × 1.5
-  (dotted) × 2/3 (triplet);
-- otherwise → the MIDI editor's own note-length / grid (`editor_step_qn` =
-  `MIDI_GetGrid`), i.e. exactly what REAPER's keyboard step recording uses.
-
-`[` / `]` (also `-` / `=`) halve / double `S.step_base`, seeding it from the
-editor value on first press (`ensure_step_base`); `.` and `,` toggle dotted /
-triplet; `\` clears all three back to "follow editor". So it defaults to
-REAPER's setting and only diverges when you ask it to.
+`[` / `]` (also `-` / `=`) call **`nudge_grid(0.5 / 2)`** →
+`SetMIDIEditorGrid(0, grid × mult)`, clamped to `[1/64, 4]` QN. That changes
+the MIDI editor grid itself, so the readout in the editor and keyboard step
+input move in lockstep. Dotted / triplet: use the MIDI editor's own grid
+dropdown (the script doesn't reimplement it). If the user has pinned a fixed
+note length, `[` / `]` still nudge the grid (harmless) but the step follows the
+pinned length — the panel's `STEP 1/n (note len | grid)` label says which.
 
 ### insert / delete / tie / rest
 
@@ -205,6 +205,16 @@ take the label as a normal argument:
 `consumed` routes a single click to exactly one target (panel button →
 string-label drag → fretboard).
 
+**Left gutter** (`L = 54`): open-note name at `x = 5`; the active string gets a
+full-width highlight band (drawn behind everything), a 2px line, and a filled
+chip behind its name — no gutter glyph, so nothing overlaps the labels.
+`note_x(0)` (open markers) sits at `L - 20`.
+
+**Capsule bar** (`inlay == 2`): the rectangle joining the two dots is
+integer-aligned — `cx = floor(note_x(f)+0.5)`, `rr = floor(ir+1)`, width
+`2·rr + 1` — so its edges line up with the circles' edges (a half-pixel
+mismatch used to shift the right edge inward).
+
 ---
 
 ## 7. Known limitations & gotchas
@@ -212,13 +222,13 @@ string-label drag → fretboard).
 - **Focus steals editor keys** – clicking the fretboard window takes key
   focus, so the MIDI editor's own arrow / Backspace / letter shortcuts stop
   working while you're on the fretboard. `handle_keys` re-implements the ones
-  that matter (digits, arrows, `R T L [ ] . , \`, Backspace, Ctrl+Z/Y, Space)
+  that matter (digits, arrows, `R T L [ ] - =`, Backspace, Ctrl+Z/Y, Space)
   against that take. Arrow keycodes are the ASCII-of-the-name magic constants
   in `K` (`LEFT = 1818584692` = `"left"`, `UP = 30064` = `"up"`, …), not
   plain codes.
 - **Keyboard layout** – digit and symbol keys come through as whatever
   character the OS produces. On layouts where the number row is shifted
-  (AZERTY etc.) you hold Shift to type fret digits, and `[ ] \ , .` may be
+  (AZERTY etc.) you hold Shift to type fret digits, and `[ ] - =` may be
   elsewhere or need AltGr. A numpad (NumLock on) always yields `0`–`9`.
 - **Preview needs a monitored track** – `StuffMIDIMessage` mode 0 → the
   script `SetOnlyTrackSelected`s the take's track so the VKB routes there, but
@@ -235,6 +245,10 @@ string-label drag → fretboard).
 - **Two-digit fret amend = 2 undo points** – the first digit's insert is its
   own undo block; the amend (`delete` + re-`insert`) is a second. Ctrl+Z peels
   them one at a time.
+- **`SetMIDIEditorGrid` only moves the grid** – there's no ReaScript setter
+  for the MIDI editor's *note-length* dropdown, so `[` / `]` change the grid.
+  With note length on "Grid" (the default) that's the whole step; with a pinned
+  length it isn't, and the `STEP` label flags which.
 - **`let ring` heuristic** – the ring tail length (`min(max(step×6,2),4)` QN)
   is a guess; a note that's never replayed on its string just rings that long.
 - **`history` / `ring_prev` hold take refs** – `ValidatePtr2`-checked before
@@ -243,8 +257,9 @@ string-label drag → fretboard).
   harmlessly pops.
 - **No polyphonic mouse** – one pointer. Chord entry is Shift+click.
 - **Runtime status** – loads and passes a stubbed-API frame harness (`gfx` /
-  `reaper` mocked; simulated clicks, key sequences incl. typed frets, tie,
-  let-ring, step keys, and a live note-on/off). Not yet run inside REAPER.
+  `reaper` mocked; simulated clicks, key sequences incl. typed frets, the
+  2-digit amend, tie, let-ring trim, `[`/`]` → `SetMIDIEditorGrid`, undo
+  forwarding, rest). Not yet run inside REAPER.
 
 ---
 

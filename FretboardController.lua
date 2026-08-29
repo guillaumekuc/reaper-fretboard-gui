@@ -1,6 +1,6 @@
 --[[
   Fretboard MIDI Controller  (ReaScript / Lua)
-  version 0.6.0
+  version 0.7.0
 
   A guitar-fretboard window that inserts notes into the take open in the active
   MIDI editor, Guitar-Pro-style: pick a string, type a fret, it writes the note
@@ -16,15 +16,16 @@
     left / right   move the step cursor back / forward one step (right = rest)
     R              rest (advance one step, insert nothing)
     T              tie: lengthen the last note by one step and advance
-    [  ]           step length: shorter / longer   (also -  = )
-    .              dotted step on/off
-    ,              triplet step on/off
-    \              step length: follow the MIDI editor again
+    [  ]  (- =)    halve / double the MIDI editor grid (the single source for
+                   step length - also what keyboard step input uses)
     L              "let ring" on/off  (notes sustain until the string is replayed)
     backspace      remove the last inserted note and step back
     ctrl+Z / Y     undo / redo
     space          transport play/stop
     shift+click    insert without advancing (chord entry)
+
+  Step length is always REAPER's: the MIDI editor's note-length setting, or its
+  grid when that follows the grid. Nothing is stored locally.
 
   See docs/REASCRIPT.md for the architecture.
 ]]--
@@ -64,9 +65,6 @@ local S = {
   panel_open    = 1,
   str_note      = { 40, 45, 50, 55, 59, 64, 35, 30, 25 },
   active_string = 3,      -- not persisted
-  step_base     = 0,      -- QN; 0 = follow the MIDI editor
-  dotted        = 0,
-  triplet       = 0,
   let_ring      = 0,
 }
 
@@ -95,7 +93,7 @@ local function save_state()
     reaper.SetExtState(SECT, k, tostring(v), true)
   end
   for _, k in ipairs({ "num_strings","num_frets","tuning","inlay","name_mode",
-                       "chan","vel","panel_open","step_base","dotted","triplet","let_ring" }) do
+                       "chan","vel","panel_open","let_ring" }) do
     set(k, S[k])
   end
   set("str_note", table.concat(S.str_note, ","))
@@ -107,7 +105,7 @@ local function load_state()
     return v ~= "" and tonumber(v) or d
   end
   for _, k in ipairs({ "num_strings","num_frets","tuning","inlay","name_mode",
-                       "chan","vel","panel_open","step_base","dotted","triplet","let_ring" }) do
+                       "chan","vel","panel_open","let_ring" }) do
     S[k] = num(k, S[k])
   end
   local sn = reaper.GetExtState(SECT, "str_note")
@@ -146,36 +144,29 @@ local function track_of(take)
   return item and reaper.GetMediaItem_Track(item) or nil
 end
 
-local function editor_step_qn(take)
-  local grid, _, notelen = reaper.MIDI_GetGrid(take)
-  if notelen and notelen > 0 then return notelen end
-  return (grid and grid > 0) and grid or 1
-end
-
--- effective step, in QN
+-- The step length is REAPER's, always: the MIDI editor's note-length setting,
+-- or its grid when note length follows the grid. No local override.
 local function step_len_qn(take)
-  if S.step_base and S.step_base > 0 then
-    local b = S.step_base
-    if S.dotted  == 1 then b = b * 1.5 end
-    if S.triplet == 1 then b = b * (2 / 3) end
-    return b
-  end
-  return editor_step_qn(take)
+  local grid, _, notelen = reaper.MIDI_GetGrid(take)
+  if notelen and notelen > 0 then return notelen, "note len" end
+  return (grid and grid > 0) and grid or 1, "grid"
 end
 
-local function ensure_step_base(take)
-  if not (S.step_base and S.step_base > 0) then
-    S.step_base = editor_step_qn(take)
+-- [ / ] : nudge the MIDI editor grid (SetMIDIEditorGrid) so it stays the one
+-- source of truth and the change shows in the editor / keyboard step input too
+local function nudge_grid(mult)
+  local take = get_take()
+  if not take then return end
+  local grid = reaper.MIDI_GetGrid(take)
+  if grid and grid > 0 then
+    reaper.SetMIDIEditorGrid(0, clamp(grid * mult, 1 / 64, 4))
   end
 end
 
 local function step_label(take)
-  if not (S.step_base and S.step_base > 0) then
-    local q = editor_step_qn(take)
-    return string.format("1/%d (editor)", math.max(1, math.floor(4 / q + 0.5)))
-  end
-  local denom = math.max(1, math.floor(4 / S.step_base + 0.5))
-  return "1/" .. denom .. (S.dotted == 1 and " dot" or "") .. (S.triplet == 1 and " trip" or "")
+  local q, src = step_len_qn(take)
+  local denom = math.max(1, math.floor(4 / q + 0.5))
+  return string.format("1/%d (%s)", denom, src)
 end
 
 local function find_note(take, sppq, pitch, chan)
@@ -424,11 +415,11 @@ local drag_s, drag_y0, drag_n0 = -1, 0, 0
 
 local function str_y(s)  return gfx.h - B - (s - 1) * str_sp end
 local function fret_x(f) return L + f * fret_sp end
-local function note_x(f) if f <= 0 then return L - 24 end return L + (f - 0.5) * fret_sp end
+local function note_x(f) if f <= 0 then return L - 20 end return L + (f - 0.5) * fret_sp end
 
 local function layout()
   header_h = (S.panel_open == 1) and PANEL_H or 26
-  L, R, T, B = 46, 16, header_h + 24, 18
+  L, R, T, B = 54, 16, header_h + 24, 18
   boardw  = gfx.w - L - R
   boardh  = gfx.h - T - B
   fret_sp = boardw / S.num_frets
@@ -440,6 +431,11 @@ end
 local function draw_board(at_cursor, playing)
   gfx.set(0.11, 0.11, 0.12); gfx.rect(0, 0, gfx.w, gfx.h)
   gfx.set(0.16, 0.16, 0.17); gfx.rect(L, T, boardw, boardh)
+
+  -- active-string highlight band (full width, behind everything)
+  local ay = str_y(S.active_string)
+  gfx.set(0.205, 0.205, 0.225)
+  gfx.rect(0, ay - str_sp * 0.42, gfx.w, str_sp * 0.84)
 
   if S.inlay == 1 then
     local midy = (str_y(1) + str_y(S.num_strings)) * 0.5
@@ -463,8 +459,12 @@ local function draw_board(at_cursor, playing)
         local tgt = pc == 0 or pc == 5
         local cap = tgt and ((pc == 0 and pcu == 5) or (pc == 5 and pcu == 0))
         if cap then
-          local cx, y0, y1, rr = note_x(f), str_y(s), str_y(s + 1), ir + 1
-          gfx.rect(cx - rr, math.min(y0, y1), rr * 2, math.abs(y1 - y0))
+          -- integer-aligned so the joining bar and the two dots share edges
+          local cx = math.floor(note_x(f) + 0.5)
+          local rr = math.floor(ir + 1)
+          local y0, y1 = str_y(s), str_y(s + 1)
+          gfx.rect(cx - rr, math.floor(math.min(y0, y1) + 0.5),
+                   rr * 2 + 1, math.floor(math.abs(y1 - y0) + 0.5))
           gfx.circle(cx, y0, rr, 1, 1); gfx.circle(cx, y1, rr, 1, 1)
           s = s + 2
         else
@@ -490,18 +490,19 @@ local function draw_board(at_cursor, playing)
   for s = 1, S.num_strings do
     local y = str_y(s)
     local act = (s == S.active_string)
-    gfx.set(act and 0.78 or 0.55, act and 0.78 or 0.55, act and 0.80 or 0.56)
+    gfx.set(act and 0.82 or 0.55, act and 0.82 or 0.55, act and 0.84 or 0.56)
     gfx.line(L, y, gfx.w - R, y)
-    if act then
-      gfx.set(0.85, 0.85, 0.55)
-      gfx.triangle(L - 34, y - 4, L - 34, y + 4, L - 28, y)
-    end
+    if act then gfx.line(L, y + 1, gfx.w - R, y + 1) end
 
     local op = pitch_at(s, 0)
+    if act then
+      gfx.set(0.32, 0.32, 0.36); gfx.rect(1, y - 8, L - 24, 16)
+      gfx.set(0.42, 0.42, 0.46); box(1, y - 8, L - 24, 16)
+    end
     if s == drag_s then gfx.set(0.98, 0.98, 1.0)
-    elseif act then gfx.set(0.90, 0.90, 0.80)
+    elseif act then gfx.set(0.96, 0.96, 0.98)
     else gfx.set(0.72, 0.72, 0.74) end
-    gfx.x = 4; gfx.y = y - 7; gfx.drawstr(note_name(op) .. octave(op))
+    gfx.x = 5; gfx.y = y - 7; gfx.drawstr(note_name(op) .. octave(op))
 
     for f = 0, S.num_frets do
       local p = pitch_at(s, f)
@@ -536,7 +537,7 @@ local function monitor_hint(take)
 end
 
 local HINTS = "0-9 fret   up/down string   left/right step   R rest   T tie   "
-           .. "[ ] . , step len   \\ follow   L let-ring   bksp del   ctrl+Z undo"
+           .. "[ ] editor grid   L let-ring   bksp del   ctrl+Z/Y undo/redo"
 
 local function draw_panel(take)
   gfx.set(0.13, 0.13, 0.15); gfx.rect(0, 0, gfx.w, PANEL_H)
@@ -574,7 +575,7 @@ local function draw_panel(take)
   if btn(379, 60, 52, bh, "Played", S.name_mode == 1) then S.name_mode = 1 end
   if btn(434, 60, 42, bh, "All",    S.name_mode == 2) then S.name_mode = 2 end
   if btn(500, 60, 74, bh, "Let ring", S.let_ring == 1) then S.let_ring = 1 - S.let_ring; ring_prev = {} end
-  caption(590, 63, "STEP " .. (take and step_label(take) or "-"))
+  caption(590, 63, "STEP " .. (take and step_label(take) or "-") .. "   ([ ] = editor grid)")
 
   gfx.set(0.44, 0.44, 0.47); gfx.x = 10; gfx.y = 84; gfx.drawstr(HINTS)
 
@@ -656,7 +657,6 @@ local K = { LEFT = 1818584692, RIGHT = 1919379572, UP = 30064, DOWN = 1685026670
 local function handle_keys(c)
   if c >= 48 and c <= 57 then type_fret(c - 48); return end
   digit_pending = nil
-  local take = get_take()
   if c == K.BKSP or c == K.DEL then delete_last()
   elseif c == K.RIGHT then step_cursor(1)
   elseif c == K.LEFT  then step_cursor(-1)
@@ -665,13 +665,8 @@ local function handle_keys(c)
   elseif c == string.byte("r") or c == string.byte("R") then step_cursor(1)
   elseif c == string.byte("t") or c == string.byte("T") then tie_extend()
   elseif c == string.byte("l") or c == string.byte("L") then S.let_ring = 1 - S.let_ring; ring_prev = {}
-  elseif c == string.byte("[") or c == string.byte("-") then
-    if take then ensure_step_base(take); S.step_base = clamp(S.step_base / 2, 1/64, 4) end
-  elseif c == string.byte("]") or c == string.byte("=") then
-    if take then ensure_step_base(take); S.step_base = clamp(S.step_base * 2, 1/64, 4) end
-  elseif c == string.byte(".") then if take then ensure_step_base(take); S.dotted = 1 - S.dotted end
-  elseif c == string.byte(",") then if take then ensure_step_base(take); S.triplet = 1 - S.triplet end
-  elseif c == string.byte("\\") then S.step_base, S.dotted, S.triplet = 0, 0, 0
+  elseif c == string.byte("[") or c == string.byte("-") then nudge_grid(0.5)
+  elseif c == string.byte("]") or c == string.byte("=") then nudge_grid(2)
   elseif c == K.CZ then reaper.Main_OnCommand(40029, 0)
   elseif c == K.CY then reaper.Main_OnCommand(40030, 0)
   elseif c == K.SPACE then reaper.Main_OnCommand(40044, 0)
