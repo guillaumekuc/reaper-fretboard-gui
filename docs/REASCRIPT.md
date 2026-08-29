@@ -125,25 +125,35 @@ They're changed **in place** in REAPER:
 
 | keys | function | REAPER call |
 |---|---|---|
-| `[` `]` (also `-` `=`) | `set_note_len(take, hwnd, ×0.5/2)` | `MIDIEditor_SetSetting_int(hwnd, "default_note_len", qn·tpqn)` |
-| `Alt+[` `Alt+]` | `set_grid(take, ×0.5/2)` | `SetMIDIEditorGrid(0, qn)` |
+| `[` `]` (also `-` `=` `{` `}`) or **Ctrl+↑/↓** | `set_note_len(take, hwnd, ×2/0.5)` | `MIDIEditor_SetSetting_int(hwnd, "default_note_len", qn·tpqn)` |
+| `Alt+[` `Alt+]` or **Alt+↑/↓** | `set_grid(take, ×0.5/2)` | `SetMIDIEditorGrid(0, qn)` |
 
-`tpqn_of(take)` derives ticks-per-quarter from the take (`MIDI_GetPPQPosFromProjQN`
-of 1 − of 0), usually 960. `Alt` is read from `mouse.cap & 16`. Both clamp to
-`[1/64, 4]` QN. Dotted / triplet aren't reimplemented — use the MIDI editor's
-own grid menu; the status line shows `note 1/n  grid 1/n`.
+The **arrow variants** exist because `[`/`]` don't survive every keyboard
+layout (on AZERTY `[` is `AltGr`+key, which also sets the Alt bit → it'd hit
+the grid branch). Ctrl/Alt+↑↓ deliver the arrow keycode plus a clean modifier
+every time. `Ctrl`/`Alt` are read from `mouse.cap & 4 / & 16`.
 
-The `default_note_len` write is a best guess at the encoding (ticks, with a
-value = "don't follow grid"); if `[`/`]` don't move the note length in REAPER,
-that's the suspect (`set_note_len` no-ops if `MIDIEditor_SetSetting_int` is
-absent). `Alt+[`/`]` on the grid is solid.
+`tpqn_of(take)` derives ticks-per-quarter from the take, usually 960. Both
+clamp to `[1/64, 4]` QN. Dotted / triplet aren't reimplemented — use the MIDI
+editor's grid menu; the status line shows `note 1/n  grid 1/n`.
+
+The `default_note_len` write is a best guess at the encoding (ticks, positive
+value = "don't follow grid"); if the note length doesn't move in REAPER,
+that's the suspect. `SetMIDIEditorGrid` is solid. There's a **keycode
+diagnostic** in the panel (`key: <n> <mods>`, top-right, 3 s) to check what a
+key actually delivers.
 
 ### insert / delete / tie / rest
 
 `insert_note(pitch, advance, string_idx)`:
 1. start / end PPQ from `cursor_qn` and `cursor_qn + step`,
-2. `MIDI_InsertNote(…, chan = S.chan-1, pitch, S.vel)` (+ `MIDI_Sort`), in an
-   `Undo_BeginBlock`/`EndBlock` pair unless `undo_suppress` is set,
+2. inside `Undo_BeginBlock` … `Undo_EndBlock("…", -1)` (skipped when
+   `undo_suppress` is set): the let-ring trim, `MIDI_InsertNote`, `MIDI_Sort`,
+   then **`mark_dirty(take)`** (`MarkTrackItemsDirty`) + `UpdateArrange()`.
+   The `mark_dirty` call is load-bearing — without it `MIDI_InsertNote` in a
+   deferred script makes **no undo point**, so one Ctrl+Z discards every note
+   entered since the script started. `delete_last`, `tie_extend` and the
+   two-digit amend do the same.
 3. push `{take, sppq, pitch, chan, prev}` onto `history`,
 4. if `S.let_ring`, stretch the end and trim the previous note on that string
    (§5),
@@ -281,8 +291,15 @@ mismatch used to shift the right edge inward).
 - **`default_note_len` encoding is a guess** – `set_note_len` writes
   `MIDIEditor_SetSetting_int(hwnd, "default_note_len", qn·tpqn)` on the belief
   that the value is in ticks and any positive value un-follows the grid. If
-  `[`/`]` don't move the note length in REAPER, verify that. `Alt+[`/`]` →
-  `SetMIDIEditorGrid` is reliable.
+  the note length doesn't move in REAPER, verify that (the panel keycode
+  diagnostic first confirms the key even arrives). `SetMIDIEditorGrid` is
+  reliable.
+- **Undo needs `MarkTrackItemsDirty`** – see §4. A deferred script's
+  `MIDI_InsertNote`/`DeleteNote`/`SetNote` inside `Undo_BeginBlock`/`EndBlock`
+  still records nothing without `mark_dirty(take)` before `Undo_EndBlock`.
+- **`history` desyncs on a manual undo** – a global Ctrl+Z can remove notes
+  the `history` stack still lists; `delete_last`'s `find_note` then finds
+  nothing and just pops (harmless).
 - **`let ring` heuristic** – the ring tail length (`min(max(step×6,2),4)` QN)
   is a guess; a note that's never replayed on its string just rings that long.
 - **`history` / `ring_prev` hold take refs** – `ValidatePtr2`-checked before

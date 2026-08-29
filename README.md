@@ -41,8 +41,8 @@ re-mapped):
 | `Q` | chord mode (Dorico-style): notes stack at the cursor; `Q` again commits and moves on |
 | `R` | rest — advance one **note length** |
 | `T` | tie: lengthen the last note by one note length and advance |
-| `[` `]` (or `-` `=`) | halve / double the MIDI editor **note length** |
-| `Alt+[` `Alt+]` | halve / double the MIDI editor **grid** |
+| `[` `]` (or `-` `=`, or `Ctrl+↑`/`Ctrl+↓`) | halve / double the MIDI editor **note length** |
+| `Alt+[` `Alt+]` (or `Alt+↑`/`Alt+↓`) | halve / double the MIDI editor **grid** |
 | `L` | "let ring" — notes sustain until that string is replayed |
 | `Backspace` | remove the last note and step back |
 | `Ctrl+Z` / `Ctrl+Y` | undo / redo |
@@ -55,6 +55,10 @@ re-mapped):
   notes are. For dotted/triplet use the editor's own grid menu.
 - **Grey notes** (what's already in the take) show for the current **beat** or
   the whole **bar** — toggle in the panel.
+- Every inserted / removed / tied note is its **own undo point** (`Ctrl+Z`
+  peels them one at a time), same as editing in the piano roll.
+- The panel shows a **keycode diagnostic** (top-right) when a key doesn't seem
+  to register — tell me what `[` / `Alt+[` report if they still don't work.
 - Move the edit cursor in the MIDI editor to reposition; the script follows.
 - The board lights up: notes at the cursor (dim), notes you play on a MIDI
   keyboard (bright), notes under the play cursor during playback (bright).
@@ -95,14 +99,14 @@ string 1 to transpose to any root.
 
 ## Status
 
-**ReaScript `v0.9.0` (this branch)** — fretboard window with Guitar-Pro-style
+**ReaScript `v0.9.1` (this branch)** — fretboard window with Guitar-Pro-style
 typed entry (pick string, type fret) into the active MIDI editor take:
-Dorico-style chord mode (`Q`), rest, tie, let-ring, undo/redo, bar navigation,
-and Dorico-style **decoupled grid vs note length** — both are REAPER's own
-MIDI-editor settings, changed in place (`[` `]` = note length, `Alt+[` `]` =
-grid). Grey "what's here" notes show per beat or per bar. Previews audibly;
-lights up cursor + live keyboard + playback. Passes a stubbed-API frame
-harness; not yet run inside REAPER. Rough edges in `docs/REASCRIPT.md §7`.
+Dorico-style chord mode (`Q`), rest, tie, let-ring, per-note undo/redo, bar
+navigation, and Dorico-style **decoupled grid vs note length** — both are
+REAPER's own MIDI-editor settings, changed in place. Grey "what's here" notes
+show per beat or per bar. Previews audibly; lights up cursor + live keyboard +
+playback. Passes a stubbed-API frame harness; not yet run inside REAPER. Rough
+edges in `docs/REASCRIPT.md §7`.
 
 **JSFX `v0.3.0` (`master`)** — all settings in the plugin GUI, drag-to-retune,
 greyscale UI. Live MIDI thru + click-to-send only (no editor insertion).

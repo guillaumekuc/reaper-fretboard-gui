@@ -1,6 +1,6 @@
 --[[
   Fretboard MIDI Controller  (ReaScript / Lua)
-  version 0.9.0
+  version 0.9.1
 
   A guitar-fretboard window that inserts notes into the take open in the active
   MIDI editor, Guitar-Pro-style: pick a string, type a fret, it writes the note
@@ -19,8 +19,8 @@
                    advancing; press Q again to commit the chord and move on
     R              rest: advance by one NOTE LENGTH, insert nothing
     T              tie: lengthen the last note by one note length and advance
-    [  ]  (- =)    halve / double the MIDI editor NOTE LENGTH
-    alt+[  alt+]   halve / double the MIDI editor GRID
+    [  ]  (- =)  or ctrl+up/down   halve / double the MIDI editor NOTE LENGTH
+    alt+[  alt+]  or alt+up/down    halve / double the MIDI editor GRID
     L              "let ring" on/off  (notes sustain until the string is replayed)
     backspace      remove the last inserted note and step back
     ctrl+Z / Y     undo / redo
@@ -138,6 +138,7 @@ local undo_suppress = false
 local digit_pending, digit_time = nil, 0
 local chord_mode  = false   -- Dorico-style: pitches stack at the cursor, no advance (Q)
 local chord_dirty = false   -- a note was added in the current chord
+local last_key, last_key_time = "", 0   -- keycode diagnostic shown in the panel
 
 local function get_take()
   local he = reaper.MIDIEditor_GetActive()
@@ -173,16 +174,16 @@ local function tpqn_of(take)
   return (d and d > 0) and d or 960
 end
 
--- Alt+[ / Alt+] : the MIDI editor grid, directly
+-- alt+[ / alt+] (and alt+up/down): the MIDI editor grid, directly
 local function set_grid(take, mult)
-  if reaper.SetMIDIEditorGrid then
+  if take and reaper.SetMIDIEditorGrid then
     reaper.SetMIDIEditorGrid(0, clamp(grid_qn(take) * mult, 1 / 64, 4))
   end
 end
 
--- [ / ] : the MIDI editor's note-length setting, directly (needs the editor hwnd)
+-- [ / ] (and ctrl+up/down): the MIDI editor's note-length setting, directly
 local function set_note_len(take, hwnd, mult)
-  if not reaper.MIDIEditor_SetSetting_int or not hwnd then return end
+  if not take or not hwnd or not reaper.MIDIEditor_SetSetting_int then return end
   local want = clamp(step_len_qn(take) * mult, 1 / 64, 4)
   reaper.MIDIEditor_SetSetting_int(hwnd, "default_note_len", math.floor(want * tpqn_of(take) + 0.5))
 end
@@ -236,6 +237,13 @@ local function sync_cursor_from_edit(take)
   end
 end
 
+-- MIDI_InsertNote & friends don't reliably make an undo point on their own
+-- (worse in a deferred script); marking the item dirty inside the block fixes it
+local function mark_dirty(take)
+  local item = take and reaper.GetMediaItemTake_Item(take)
+  if item then reaper.MarkTrackItemsDirty(reaper.GetMediaItem_Track(item), item) end
+end
+
 local function insert_note(pitch, advance, string_idx)
   local take = get_take()
   if not take then return false end
@@ -244,6 +252,8 @@ local function insert_note(pitch, advance, string_idx)
   local prev = cursor_qn
   local sppq = reaper.MIDI_GetPPQPosFromProjQN(take, cursor_qn)
   local eppq = reaper.MIDI_GetPPQPosFromProjQN(take, cursor_qn + step)
+
+  if not undo_suppress then reaper.Undo_BeginBlock() end
 
   if S.let_ring == 1 and string_idx then
     local tail = math.min(math.max(step * 6, 2), 4)          -- ring up to a bar
@@ -255,11 +265,12 @@ local function insert_note(pitch, advance, string_idx)
     end
   end
 
-  if not undo_suppress then reaper.Undo_BeginBlock() end
   reaper.MIDI_InsertNote(take, false, false, sppq, eppq, S.chan - 1, pitch, S.vel, false)
   reaper.MIDI_Sort(take)
   if not undo_suppress then
+    mark_dirty(take)
     reaper.Undo_EndBlock("Fretboard: insert " .. note_name(pitch) .. octave(pitch), -1)
+    reaper.UpdateArrange()
   end
 
   history[#history + 1] = { take = take, sppq = sppq, pitch = pitch, chan = S.chan - 1, prev = prev }
@@ -280,7 +291,11 @@ local function delete_last()
       if not undo_suppress then reaper.Undo_BeginBlock() end
       reaper.MIDI_DeleteNote(h.take, idx)
       reaper.MIDI_Sort(h.take)
-      if not undo_suppress then reaper.Undo_EndBlock("Fretboard: remove note", -1) end
+      if not undo_suppress then
+        mark_dirty(h.take)
+        reaper.Undo_EndBlock("Fretboard: remove note", -1)
+        reaper.UpdateArrange()
+      end
     end
   end
   set_cursor(h.prev)
@@ -324,7 +339,9 @@ local function tie_extend()
   reaper.Undo_BeginBlock()
   reaper.MIDI_SetNote(take, idx, nil, nil, nil, new_e, nil, nil, nil, false)
   reaper.MIDI_Sort(take)
+  mark_dirty(take)
   reaper.Undo_EndBlock("Fretboard: tie", -1)
+  reaper.UpdateArrange()
   set_cursor((cursor_qn or 0) + step)
 end
 
@@ -339,7 +356,9 @@ local function type_fret(d)
       delete_last()
       insert_note(pitch_at(S.active_string, combined), not chord_mode, S.active_string)
       undo_suppress = false
+      mark_dirty(get_take())
       reaper.Undo_EndBlock("Fretboard: fret " .. combined, -1)
+      reaper.UpdateArrange()
       preview_on(pitch_at(S.active_string, combined))
       digit_pending, digit_time = nil, now
       return
@@ -599,8 +618,8 @@ local function monitor_hint(take)
   return "   (arm + monitor the track to hear previews)"
 end
 
-local HINTS = "0-9 fret   up/down string   left/right grid-step (ctrl: bar)   Q chord   "
-           .. "R rest   T tie   [ ] note len   alt+[ ] grid   L let-ring   ctrl+Z/Y undo"
+local HINTS = "0-9 fret   up/down string   left/right grid-step   ctrl+l/r bar   Q chord   R rest   T tie   "
+           .. "[ ] or ctrl+up/down = note len   alt+[ ] or alt+up/down = grid   L let-ring   ctrl+Z/Y undo"
 
 local function draw_panel(take)
   gfx.set(0.13, 0.13, 0.15); gfx.rect(0, 0, gfx.w, PANEL_H)
@@ -647,6 +666,10 @@ local function draw_panel(take)
   if btn(737, 60, 42, bh, "Bar",  S.ctx_mode == 1) then S.ctx_mode = 1 end
 
   gfx.set(0.44, 0.44, 0.47); gfx.x = 10; gfx.y = 84; gfx.drawstr(HINTS)
+  if reaper.time_precise() - last_key_time < 3 then      -- key diagnostic (last press)
+    gfx.set(0.55, 0.55, 0.40); gfx.x = gfx.w - 150; gfx.y = 84
+    gfx.drawstr("key: " .. last_key)
+  end
 
   gfx.x = 10; gfx.y = PANEL_H - 20
   if take then
@@ -744,15 +767,21 @@ local function handle_keys(c)
   if c == K.BKSP or c == K.DEL then delete_last()
   elseif c == K.RIGHT then if ctrl then step_bar(1)  else step_cursor(1)  end
   elseif c == K.LEFT  then if ctrl then step_bar(-1) else step_cursor(-1) end
-  elseif c == K.UP    then S.active_string = clamp(S.active_string + 1, 1, S.num_strings)
-  elseif c == K.DOWN  then S.active_string = clamp(S.active_string - 1, 1, S.num_strings)
+  elseif c == K.UP   then
+    if ctrl then set_note_len(take, hwnd, 2)      -- ctrl+up   = longer note
+    elseif alt then set_grid(take, 2)             -- alt+up    = wider grid
+    else S.active_string = clamp(S.active_string + 1, 1, S.num_strings) end
+  elseif c == K.DOWN then
+    if ctrl then set_note_len(take, hwnd, 0.5)    -- ctrl+down  = shorter note
+    elseif alt then set_grid(take, 0.5)           -- alt+down   = finer grid
+    else S.active_string = clamp(S.active_string - 1, 1, S.num_strings) end
   elseif c == string.byte("r") or c == string.byte("R") then step_cursor(1, "note")   -- rest of the note length
   elseif c == string.byte("t") or c == string.byte("T") then tie_extend()
   elseif c == string.byte("l") or c == string.byte("L") then S.let_ring = 1 - S.let_ring; ring_prev = {}
-  elseif c == string.byte("[") or c == string.byte("-") then
-    if take then if alt then set_grid(take, 0.5) else set_note_len(take, hwnd, 0.5) end end
-  elseif c == string.byte("]") or c == string.byte("=") then
-    if take then if alt then set_grid(take, 2) else set_note_len(take, hwnd, 2) end end
+  elseif c == string.byte("[") or c == string.byte("-") or c == string.byte("{") then
+    if alt then set_grid(take, 0.5) else set_note_len(take, hwnd, 0.5) end
+  elseif c == string.byte("]") or c == string.byte("=") or c == string.byte("}") then
+    if alt then set_grid(take, 2) else set_note_len(take, hwnd, 2) end
   elseif c == K.CZ then reaper.Main_OnCommand(40029, 0)
   elseif c == K.CY then reaper.Main_OnCommand(40030, 0)
   elseif c == K.SPACE then reaper.Main_OnCommand(40044, 0)
@@ -770,6 +799,12 @@ local function loop()
 
   update_mouse()
   consumed = false
+  if c ~= 0 and (c < 48 or c > 57) then
+    last_key = string.format("%d%s%s%s", c,
+      (mouse.cap & 4) ~= 0 and " ctrl" or "", (mouse.cap & 8) ~= 0 and " shift" or "",
+      (mouse.cap & 16) ~= 0 and " alt" or "")
+    last_key_time = reaper.time_precise()
+  end
   if digit_pending and (reaper.time_precise() - digit_time) > 0.8 then digit_pending = nil end
   handle_keys(c)
   poll_live_input()
