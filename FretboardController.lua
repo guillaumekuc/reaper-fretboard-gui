@@ -1,6 +1,6 @@
 --[[
   Fretboard MIDI Controller  (ReaScript / Lua)
-  version 0.9.7-dbg
+  version 0.9.8-dbg
 
   A guitar-fretboard window that inserts notes into the take open in the active
   MIDI editor, Guitar-Pro-style: pick a string, type a fret, it writes the note
@@ -830,7 +830,7 @@ local K = { LEFT = 1818584692, RIGHT = 1919379572, UP = 30064, DOWN = 1685026670
 
 local function handle_keys(c)
   if c >= 48 and c <= 57 then type_fret(c - 48); return end
-  digit_pending = nil
+  if c ~= 0 then digit_pending = nil end   -- clear on a real non-digit key, NOT every idle frame
 
   if c == string.byte("q") or c == string.byte("Q") then      -- Dorico-style chord mode
     if chord_mode and chord_dirty then step_cursor(1) end     -- commit the chord, move on
