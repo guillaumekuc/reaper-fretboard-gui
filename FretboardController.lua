@@ -1,6 +1,6 @@
 --[[
   Fretboard MIDI Controller  (ReaScript / Lua)
-  version 0.9.4-dbg
+  version 0.9.5-dbg
 
   A guitar-fretboard window that inserts notes into the take open in the active
   MIDI editor, Guitar-Pro-style: pick a string, type a fret, it writes the note
@@ -27,11 +27,12 @@
     space          transport play/stop
     shift+click    insert without advancing (chord entry)
 
-  Grid and note length are REAPER's own MIDI-editor settings, modified in place
-  (SetMIDIEditorGrid / MIDIEditor_SetSetting_int) - nothing is stored locally.
-  Grid = caret movement & snap; note length = the length of inserted notes and
-  how far a note advances the caret. If this REAPER can't set the note length,
-  the NOTE control falls back to the grid (panel shows "=grid").
+  Grid and note length are REAPER's own MIDI-editor settings, modified in place:
+  grid via SetMIDIEditorGrid, note length via the "Set length for next inserted
+  note: 1/N" actions (found at startup - needs the SWS extension). Nothing is
+  stored locally. Grid = caret movement & snap; note length = the length of
+  inserted notes and how far a note advances the caret. Without SWS the NOTE
+  control falls back to the grid.
 
   See docs/REASCRIPT.md for the architecture.
 ]]--
@@ -39,6 +40,7 @@
 local SECT = "GK_FretboardController"
 local MAX_STRINGS = 9
 local HAS_INPUT_POLL = reaper.MIDI_GetRecentInputEvent ~= nil
+local MIDI_SECTION  = 32060   -- MIDI editor action section
 
 -- ============================================================= model =====
 
@@ -175,48 +177,58 @@ local function tpqn_of(take)
   return (d and d > 0) and d or 960
 end
 
--- nearest 1/n note value for a QN length, as an integer denominator
-local function denom_of(qn) return clamp(math.floor(4 / qn + 0.5), 1, 128) end
-local function step_dir(denom, finer)
-  return finer and clamp(denom * 2, 1, 128) or clamp(math.floor(denom / 2), 1, 128)
-end
-
--- set the MIDI editor GRID one note value finer / wider
 local DBG = ""
+
+-- set the MIDI editor GRID: halve / double the current QN division
 local function set_grid(take, finer)
   if not take or not reaper.SetMIDIEditorGrid then return end
-  local g0     = grid_qn(take)
-  local target = 4 / step_dir(denom_of(g0), finer)
+  local g = grid_qn(take)
+  local target = clamp(finer and g / 2 or g * 2, 1 / 32, 16)   -- 1/128 note .. 4 whole notes
   reaper.SetMIDIEditorGrid(0, target)
-  DBG = string.format("setgrid %s -> asked %.4f  now %.4f",
-    finer and "finer" or "wider", target, grid_qn(take))
+  DBG = string.format("grid %s: %.4f -> asked %.4f  now %.4f",
+    finer and "finer" or "wider", g, target, grid_qn(take))
 end
 
--- set the MIDI editor NOTE LENGTH one note value finer / wider (direct;
--- falls back to the grid if this REAPER can't set the note length)
-local NOTELEN_OK = nil   -- nil = untested, then true/false
+-- "Set length for next inserted note: 1/N" actions, discovered at startup (needs SWS)
+local notelen_actions = {}   -- QN value -> MIDI editor command id
+local function scan_notelen_actions()
+  if not reaper.CF_GetCommandText then return end
+  for cmd = 40000, 43000 do
+    local txt = reaper.CF_GetCommandText(MIDI_SECTION, cmd)
+    if txt and txt ~= "" and txt:find("ength for next inserted note", 1, true) then
+      local n = txt:match(".-1/(%d+)%s*$")            -- plain "1/N" only (skip dotted / triplet)
+      if n then notelen_actions[4 / tonumber(n)] = cmd end
+      if txt:match("[:%s]1%s*$") then notelen_actions[4] = cmd end   -- "...: 1" = whole note
+    end
+  end
+end
+
+-- set the MIDI editor NOTE LENGTH: nearest "set length" action to half / double
+-- current; falls back to the grid if the actions weren't found
+local NOTELEN_OK = nil
 local function set_note_len(take, hwnd, finer)
   if not take then return end
-  local target_qn = 4 / step_dir(denom_of(step_len_qn(take)), finer)
-  local ticks = math.floor(target_qn * tpqn_of(take) + 0.5)
-  if hwnd and reaper.MIDIEditor_SetSetting_int and reaper.MIDIEditor_GetSetting_int then
-    local before = reaper.MIDIEditor_GetSetting_int(hwnd, "default_note_len")
-    reaper.MIDIEditor_SetSetting_int(hwnd, "default_note_len", ticks)
-    local after = reaper.MIDIEditor_GetSetting_int(hwnd, "default_note_len")
-    NOTELEN_OK = after ~= before
-    DBG = string.format("setnl asked %d ticks  before %s  after %s  setInt=%s",
-      ticks, tostring(before), tostring(after),
-      tostring(reaper.MIDIEditor_SetSetting_int ~= nil))
+  local target = clamp(finer and step_len_qn(take) / 2 or step_len_qn(take) * 2, 1 / 32, 4)
+  local best, bestd
+  for qn, cmd in pairs(notelen_actions) do
+    local d = math.abs(qn - target)
+    if not bestd or d < bestd then bestd, best = d, cmd end
+  end
+  if best and hwnd then
+    reaper.MIDIEditor_OnCommand(hwnd, best)
+    NOTELEN_OK = true
+    DBG = string.format("notelen -> action %d (target %.4f)", best, target)
   else
     NOTELEN_OK = false
-    DBG = "setnl: MIDIEditor_SetSetting_int/GetSetting_int not available  hwnd=" .. tostring(hwnd ~= nil)
+    DBG = "notelen: no 'set length' actions found (need SWS) -> grid"
+    set_grid(take, finer)
   end
-  if not NOTELEN_OK then set_grid(take, finer) end   -- no note-length setter -> the grid
 end
 
 local function as_frac(qn)
-  local denom = math.max(1, math.floor(4 / qn + 0.5))
-  return "1/" .. denom
+  if not qn or qn <= 0 then return "-" end
+  if qn >= 3.9 then return tostring(math.floor(qn / 4 + 0.5)) end   -- whole notes: "1", "2", "4"
+  return "1/" .. math.max(1, math.floor(4 / qn + 0.5))
 end
 
 local function step_label(take)
@@ -714,9 +726,10 @@ local function draw_panel(take)
     gfx.drawstr("key: " .. last_key)
   end
   gfx.set(0.50, 0.50, 0.42); gfx.x = 10; gfx.y = 100      -- grid / note-length diagnostic
-  gfx.drawstr("dbg: MIDI_GetGrid=" .. (take and string.format("%.4f", grid_qn(take)) or "-")
-    .. "   MGN=" .. (take and select(3, reaper.MIDI_GetGrid(take)) or "-")
-    .. "   " .. DBG)
+  local nla = 0; for _ in pairs(notelen_actions) do nla = nla + 1 end
+  gfx.drawstr(string.format("dbg: grid=%.3f notelen=%.3f  len-actions=%d  %s",
+    take and grid_qn(take) or 0,
+    take and (select(3, reaper.MIDI_GetGrid(take)) or 0) or 0, nla, DBG))
 
   gfx.x = 10; gfx.y = PANEL_H - 20
   if take then
@@ -900,6 +913,7 @@ local function on_exit()
 end
 
 load_state()
+scan_notelen_actions()
 local d, x, y, w, h = 0, 120, 120, 1040, 320
 local wnd = reaper.GetExtState(SECT, "wnd")
 if wnd ~= "" then
