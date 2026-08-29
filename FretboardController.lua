@@ -1,6 +1,6 @@
 --[[
   Fretboard MIDI Controller  (ReaScript / Lua)
-  version 0.8.0
+  version 0.9.0
 
   A guitar-fretboard window that inserts notes into the take open in the active
   MIDI editor, Guitar-Pro-style: pick a string, type a fret, it writes the note
@@ -13,22 +13,24 @@
   Keys (the window steals focus from the MIDI editor, so these are re-mapped):
     0-9            fret on the active string  (type 1 then 2 quickly = 12)
     up / down      choose the active string
-    left / right   move the step cursor back / forward one step (right = rest)
+    left / right   move the caret by one GRID step
     ctrl+left/right jump to the previous / next bar
     Q              chord mode (Dorico-style): notes stack at the cursor without
                    advancing; press Q again to commit the chord and move on
-    R              rest (advance one step, insert nothing)
-    T              tie: lengthen the last note by one step and advance
-    [  ]  (- =)    halve / double the MIDI editor grid (the single source for
-                   step length - also what keyboard step input uses)
+    R              rest: advance by one NOTE LENGTH, insert nothing
+    T              tie: lengthen the last note by one note length and advance
+    [  ]  (- =)    halve / double the MIDI editor NOTE LENGTH
+    alt+[  alt+]   halve / double the MIDI editor GRID
     L              "let ring" on/off  (notes sustain until the string is replayed)
     backspace      remove the last inserted note and step back
     ctrl+Z / Y     undo / redo
     space          transport play/stop
     shift+click    insert without advancing (chord entry)
 
-  Step length is always REAPER's: the MIDI editor's note-length setting, or its
-  grid when that follows the grid. Nothing is stored locally.
+  Grid and note length are REAPER's own MIDI-editor settings, modified in place
+  (SetMIDIEditorGrid / MIDIEditor_SetSetting_int) - nothing is stored locally.
+  Grid = caret movement & snap; note length = the length of inserted notes and
+  how far a note advances the caret.
 
   See docs/REASCRIPT.md for the architecture.
 ]]--
@@ -69,6 +71,7 @@ local S = {
   str_note      = { 40, 45, 50, 55, 59, 64, 35, 30, 25 },
   active_string = 3,      -- not persisted
   let_ring      = 0,
+  ctx_mode      = 0,      -- grey context notes: 0 = current beat, 1 = whole bar
 }
 
 local function pitch_at(s, f) return S.str_note[s] + f end   -- s: 1 = lowest string
@@ -96,7 +99,7 @@ local function save_state()
     reaper.SetExtState(SECT, k, tostring(v), true)
   end
   for _, k in ipairs({ "num_strings","num_frets","tuning","inlay","name_mode",
-                       "chan","vel","panel_open","let_ring" }) do
+                       "chan","vel","panel_open","let_ring","ctx_mode" }) do
     set(k, S[k])
   end
   set("str_note", table.concat(S.str_note, ","))
@@ -108,7 +111,7 @@ local function load_state()
     return v ~= "" and tonumber(v) or d
   end
   for _, k in ipairs({ "num_strings","num_frets","tuning","inlay","name_mode",
-                       "chan","vel","panel_open","let_ring" }) do
+                       "chan","vel","panel_open","let_ring","ctx_mode" }) do
     S[k] = num(k, S[k])
   end
   local sn = reaper.GetExtState(SECT, "str_note")
@@ -149,29 +152,49 @@ local function track_of(take)
   return item and reaper.GetMediaItem_Track(item) or nil
 end
 
--- The step length is REAPER's, always: the MIDI editor's note-length setting,
--- or its grid when note length follows the grid. No local override.
-local function step_len_qn(take)
-  local grid, _, notelen = reaper.MIDI_GetGrid(take)
-  if notelen and notelen > 0 then return notelen, "note len" end
-  return (grid and grid > 0) and grid or 1, "grid"
+-- All lengths come from REAPER, never a private var:
+--   grid_qn      = the MIDI editor grid  (caret / arrow movement, snap)
+--   step_len_qn  = the length of inserted notes (MIDI editor note-length,
+--                  which falls back to the grid when it "follows grid")
+local function grid_qn(take)
+  local g = reaper.MIDI_GetGrid(take)
+  return (g and g > 0) and g or 1
 end
 
--- [ / ] : nudge the MIDI editor grid (SetMIDIEditorGrid) so it stays the one
--- source of truth and the change shows in the editor / keyboard step input too
-local function nudge_grid(mult)
-  local take = get_take()
-  if not take then return end
-  local grid = reaper.MIDI_GetGrid(take)
-  if grid and grid > 0 then
-    reaper.SetMIDIEditorGrid(0, clamp(grid * mult, 1 / 64, 4))
+local function step_len_qn(take)
+  local grid, _, notelen = reaper.MIDI_GetGrid(take)
+  if notelen and notelen > 0 then return notelen end
+  return (grid and grid > 0) and grid or 1
+end
+
+-- ticks per quarter note for this take (usually 960)
+local function tpqn_of(take)
+  local d = reaper.MIDI_GetPPQPosFromProjQN(take, 1) - reaper.MIDI_GetPPQPosFromProjQN(take, 0)
+  return (d and d > 0) and d or 960
+end
+
+-- Alt+[ / Alt+] : the MIDI editor grid, directly
+local function set_grid(take, mult)
+  if reaper.SetMIDIEditorGrid then
+    reaper.SetMIDIEditorGrid(0, clamp(grid_qn(take) * mult, 1 / 64, 4))
   end
 end
 
+-- [ / ] : the MIDI editor's note-length setting, directly (needs the editor hwnd)
+local function set_note_len(take, hwnd, mult)
+  if not reaper.MIDIEditor_SetSetting_int or not hwnd then return end
+  local want = clamp(step_len_qn(take) * mult, 1 / 64, 4)
+  reaper.MIDIEditor_SetSetting_int(hwnd, "default_note_len", math.floor(want * tpqn_of(take) + 0.5))
+end
+
+local function as_frac(qn)
+  local denom = math.max(1, math.floor(4 / qn + 0.5))
+  return "1/" .. denom
+end
+
 local function step_label(take)
-  local q, src = step_len_qn(take)
-  local denom = math.max(1, math.floor(4 / q + 0.5))
-  return string.format("1/%d (%s)", denom, src)
+  local g, n = grid_qn(take), step_len_qn(take)
+  return string.format("note %s   grid %s", as_frac(n), as_frac(g))
 end
 
 local function find_note(take, sppq, pitch, chan)
@@ -207,7 +230,7 @@ local function sync_cursor_from_edit(take)
   local t = reaper.GetCursorPosition()
   if not last_cursor_time or math.abs(t - last_cursor_time) > 1e-6 then
     local qn = reaper.TimeMap2_timeToQN(0, t)
-    local g  = step_len_qn(take)
+    local g  = grid_qn(take)                       -- caret snaps to the grid
     cursor_qn = math.floor(qn / g + 0.5) * g
     last_cursor_time = reaper.TimeMap2_QNToTime(0, cursor_qn)
   end
@@ -263,13 +286,15 @@ local function delete_last()
   set_cursor(h.prev)
 end
 
-local function step_cursor(dir)
+-- move the caret by `by` ("grid" for arrows, "note" for a rest of the current length)
+local function step_cursor(dir, by)
   local take = get_take()
   if not take then return end
   if not cursor_qn then sync_cursor_from_edit(take) end
   preview_off()
   chord_dirty = false
-  set_cursor(cursor_qn + dir * step_len_qn(take))
+  local amt = (by == "note") and step_len_qn(take) or grid_qn(take)
+  set_cursor(cursor_qn + dir * amt)
 end
 
 -- jump the cursor to the start of the next/previous bar (Ctrl + left/right)
@@ -328,16 +353,29 @@ local function type_fret(d)
   digit_time = now
 end
 
--- notes in the take at the step slot / play cursor
+-- PPQ window shown as grey "context" notes: the current beat, or the whole bar
+local function context_window(take)
+  if not cursor_qn then return nil end
+  local t = reaper.TimeMap2_QNToTime(0, cursor_qn)
+  local beats, meas = reaper.TimeMap2_timeToBeats(0, t)
+  local lo_t, hi_t
+  if S.ctx_mode == 1 then                                   -- Bar
+    lo_t = reaper.TimeMap2_beatsToTime(0, 0, meas)
+    hi_t = reaper.TimeMap2_beatsToTime(0, 0, meas + 1)
+  else                                                       -- Beat
+    lo_t = reaper.TimeMap2_beatsToTime(0, math.floor(beats), meas)
+    hi_t = reaper.TimeMap2_beatsToTime(0, math.floor(beats) + 1, meas)
+  end
+  return reaper.MIDI_GetPPQPosFromProjQN(take, reaper.TimeMap2_timeToQN(0, lo_t)),
+         reaper.MIDI_GetPPQPosFromProjQN(take, reaper.TimeMap2_timeToQN(0, hi_t))
+end
+
+-- notes in the take in the context window / under the play cursor
 local function scan_context(take)
   local at_cursor, playing = {}, {}
   if not take then return at_cursor, playing end
   local _, notes = reaper.MIDI_CountEvts(take)
-  local cur_ppq, slot_ppq
-  if cursor_qn then
-    cur_ppq  = reaper.MIDI_GetPPQPosFromProjQN(take, cursor_qn)
-    slot_ppq = reaper.MIDI_GetPPQPosFromProjQN(take, cursor_qn + step_len_qn(take))
-  end
+  local lo_ppq, hi_ppq = context_window(take)
   local play_ppq
   if (reaper.GetPlayState() & 1) == 1 then
     play_ppq = reaper.MIDI_GetPPQPosFromProjTime(take, reaper.GetPlayPosition())
@@ -345,7 +383,7 @@ local function scan_context(take)
   for i = 0, notes - 1 do
     local ok, _, muted, sppq, eppq, _, pitch = reaper.MIDI_GetNote(take, i)
     if ok and not muted then
-      if cur_ppq and sppq < slot_ppq and eppq > cur_ppq - 1 then at_cursor[pitch] = true end
+      if lo_ppq and sppq < hi_ppq and eppq > lo_ppq then at_cursor[pitch] = true end
       if play_ppq and sppq <= play_ppq and eppq > play_ppq then playing[pitch] = true end
     end
   end
@@ -561,8 +599,8 @@ local function monitor_hint(take)
   return "   (arm + monitor the track to hear previews)"
 end
 
-local HINTS = "0-9 fret   up/down string   left/right step   ctrl+l/r bar   Q chord   "
-           .. "R rest   T tie   [ ] grid   L let-ring   bksp del   ctrl+Z/Y undo"
+local HINTS = "0-9 fret   up/down string   left/right grid-step (ctrl: bar)   Q chord   "
+           .. "R rest   T tie   [ ] note len   alt+[ ] grid   L let-ring   ctrl+Z/Y undo"
 
 local function draw_panel(take)
   gfx.set(0.13, 0.13, 0.15); gfx.rect(0, 0, gfx.w, PANEL_H)
@@ -600,11 +638,13 @@ local function draw_panel(take)
   if btn(379, 60, 52, bh, "Played", S.name_mode == 1) then S.name_mode = 1 end
   if btn(434, 60, 42, bh, "All",    S.name_mode == 2) then S.name_mode = 2 end
   if btn(500, 60, 74, bh, "Let ring", S.let_ring == 1) then S.let_ring = 1 - S.let_ring; ring_prev = {} end
-  if btn(580, 60, 66, bh, "Chord", chord_mode) then
+  if btn(580, 60, 62, bh, "Chord", chord_mode) then
     if chord_mode and chord_dirty then step_cursor(1) end
     chord_mode = not chord_mode; chord_dirty = false; preview_off()
   end
-  caption(660, 63, "STEP " .. (take and step_label(take) or "-"))
+  caption(652, 63, "GREY")
+  if btn(688, 60, 46, bh, "Beat", S.ctx_mode == 0) then S.ctx_mode = 0 end
+  if btn(737, 60, 42, bh, "Bar",  S.ctx_mode == 1) then S.ctx_mode = 1 end
 
   gfx.set(0.44, 0.44, 0.47); gfx.x = 10; gfx.y = 84; gfx.drawstr(HINTS)
 
@@ -618,9 +658,9 @@ local function draw_panel(take)
       where = string.format("  @ bar %d beat %.2f", meas + 1, beats + 1)
     end
     local ap = pitch_at(S.active_string, 0)
-    gfx.drawstr(string.format("Insert into: %s%s   string %d (%s%d open)%s",
+    gfx.drawstr(string.format("%s%s   string %d (%s%d)   %s%s",
       nm ~= "" and nm or "MIDI editor take", where,
-      S.active_string, note_name(ap), octave(ap), monitor_hint(take)))
+      S.active_string, note_name(ap), octave(ap), step_label(take), monitor_hint(take)))
   else
     gfx.set(0.60, 0.50, 0.45)
     gfx.drawstr("No MIDI editor open - clicks/keys only preview. Open a MIDI item in the MIDI editor.")
@@ -699,16 +739,20 @@ local function handle_keys(c)
 
   if c ~= 0 then preview_off() end   -- a real non-note key ends any ringing preview
   local ctrl = (mouse.cap & 4) ~= 0
+  local alt  = (mouse.cap & 16) ~= 0
+  local take, hwnd = get_take()
   if c == K.BKSP or c == K.DEL then delete_last()
   elseif c == K.RIGHT then if ctrl then step_bar(1)  else step_cursor(1)  end
   elseif c == K.LEFT  then if ctrl then step_bar(-1) else step_cursor(-1) end
   elseif c == K.UP    then S.active_string = clamp(S.active_string + 1, 1, S.num_strings)
   elseif c == K.DOWN  then S.active_string = clamp(S.active_string - 1, 1, S.num_strings)
-  elseif c == string.byte("r") or c == string.byte("R") then step_cursor(1)
+  elseif c == string.byte("r") or c == string.byte("R") then step_cursor(1, "note")   -- rest of the note length
   elseif c == string.byte("t") or c == string.byte("T") then tie_extend()
   elseif c == string.byte("l") or c == string.byte("L") then S.let_ring = 1 - S.let_ring; ring_prev = {}
-  elseif c == string.byte("[") or c == string.byte("-") then nudge_grid(0.5)
-  elseif c == string.byte("]") or c == string.byte("=") then nudge_grid(2)
+  elseif c == string.byte("[") or c == string.byte("-") then
+    if take then if alt then set_grid(take, 0.5) else set_note_len(take, hwnd, 0.5) end end
+  elseif c == string.byte("]") or c == string.byte("=") then
+    if take then if alt then set_grid(take, 2) else set_note_len(take, hwnd, 2) end end
   elseif c == K.CZ then reaper.Main_OnCommand(40029, 0)
   elseif c == K.CY then reaper.Main_OnCommand(40030, 0)
   elseif c == K.SPACE then reaper.Main_OnCommand(40044, 0)

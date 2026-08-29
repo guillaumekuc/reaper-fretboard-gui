@@ -52,7 +52,7 @@ function loop()
 
   update_mouse()             -- edge detection: mouse.down / .up / .held
   consumed = false           -- click-routing flag for this frame
-  handle_keys(c)             -- digits, arrows(+ctrl=bar), Q chord, R/T/L, [ ]=grid, ctrl+Z/Y
+  handle_keys(c)             -- digits, arrows(+ctrl=bar), Q chord, R/T/L, [ ]=note (alt=grid)
   poll_live_input()          -- fold hardware MIDI into live_notes
 
   take = get_take()          -- the MIDI editor's active take, or nil
@@ -95,13 +95,14 @@ is the lowest string; `pitch_at(s, f) = S.str_note[s] + f`.
 
 - **initialised** from the edit cursor (`GetCursorPosition` → `timeToQN`),
   snapped to the step length.
-- **advanced** by `step_len_qn(take)` after each inserted note — unless Shift
-  is held or **chord mode** is on (stack at the cursor, don't move).
-- **nudged** by `step_cursor(±1)` on **← / →** (one step, no note; → = rest)
-  and `step_bar(±1)` on **Ctrl+← / →** (to the previous / next barline; the
-  first Ctrl+← from mid-bar snaps to the current bar's start). These exist
-  because the window takes focus off the MIDI editor. Backspace (remove last
-  note + step back) is separate. Ctrl is read from `mouse.cap & 4` (it tracks
+- **advanced** by `step_len_qn(take)` (the note length) after each inserted
+  note — unless Shift is held or **chord mode** is on (stack, don't move).
+- **nudged** by `step_cursor(±1, by)` — `by = "grid"` (default) on **← / →**,
+  `by = "note"` on **R** (a rest of the current note length). And
+  `step_bar(±1)` on **Ctrl+← / →** (to the previous / next barline; first
+  Ctrl+← from mid-bar snaps to this bar's start). These exist because the
+  window takes focus off the MIDI editor. Backspace (remove last note + step
+  back) is separate. Ctrl/Alt come from `mouse.cap & 4 / & 16` (they track
   modifier keys even with no mouse button down).
 - **re-synced** to the edit cursor whenever the user moves it: each frame,
   `sync_cursor_from_edit` compares `GetCursorPosition()` to
@@ -109,19 +110,33 @@ is the lowest string; `pitch_at(s, f) = S.str_note[s] + f`.
   differ, adopts the user's position. So: click in the MIDI editor to
   reposition, then keep entering from there.
 
-### Step length — one source of truth
+### Grid vs note length — REAPER owns both
 
-`step_len_qn(take)` = **REAPER's own value, always**: `MIDI_GetGrid`'s note
-length if set, otherwise its grid — exactly what keyboard step recording uses.
-There is no local step state.
+Two independent lengths, both read live from REAPER, **never a local var**
+(Dorico's model):
 
-`[` / `]` (also `-` / `=`) call **`nudge_grid(0.5 / 2)`** →
-`SetMIDIEditorGrid(0, grid × mult)`, clamped to `[1/64, 4]` QN. That changes
-the MIDI editor grid itself, so the readout in the editor and keyboard step
-input move in lockstep. Dotted / triplet: use the MIDI editor's own grid
-dropdown (the script doesn't reimplement it). If the user has pinned a fixed
-note length, `[` / `]` still nudge the grid (harmless) but the step follows the
-pinned length — the panel's `STEP 1/n (note len | grid)` label says which.
+- **`grid_qn(take)`** = `MIDI_GetGrid`'s grid. Drives caret movement (←/→),
+  and `sync_cursor_from_edit`'s snap.
+- **`step_len_qn(take)`** = `MIDI_GetGrid`'s note-length, or the grid when
+  that's "follow grid". Drives the length of inserted notes and how far an
+  inserted note advances the caret (and `R`, `T`).
+
+They're changed **in place** in REAPER:
+
+| keys | function | REAPER call |
+|---|---|---|
+| `[` `]` (also `-` `=`) | `set_note_len(take, hwnd, ×0.5/2)` | `MIDIEditor_SetSetting_int(hwnd, "default_note_len", qn·tpqn)` |
+| `Alt+[` `Alt+]` | `set_grid(take, ×0.5/2)` | `SetMIDIEditorGrid(0, qn)` |
+
+`tpqn_of(take)` derives ticks-per-quarter from the take (`MIDI_GetPPQPosFromProjQN`
+of 1 − of 0), usually 960. `Alt` is read from `mouse.cap & 16`. Both clamp to
+`[1/64, 4]` QN. Dotted / triplet aren't reimplemented — use the MIDI editor's
+own grid menu; the status line shows `note 1/n  grid 1/n`.
+
+The `default_note_len` write is a best guess at the encoding (ticks, with a
+value = "don't follow grid"); if `[`/`]` don't move the note length in REAPER,
+that's the suspect (`set_note_len` no-ops if `MIDIEditor_SetSetting_int` is
+absent). `Alt+[`/`]` on the grid is solid.
 
 ### insert / delete / tie / rest
 
@@ -183,10 +198,12 @@ note or mouse-release.
      routing needed. (Piano-roll *mouse* preview isn't hardware input, so it
      doesn't show.)
   3. **playback** notes straddling the play cursor → bright.
-  4. **take notes in the current step slot** (`scan_context`) → dim. This
-     replaced v0.4's "every note in the take as a grey dot", which read as
-     noise / fake inlays. Now the board only shows what's *at the cursor*, so
-     arrowing through the take reveals each chord.
+  4. **take notes in the context window** (`scan_context`) → dim grey. The
+     window is `context_window(take)`: `S.ctx_mode` 0 = the current **beat**
+     (`floor(beats)`…`+1` via `TimeMap2_timeToBeats`/`beatsToTime`), 1 = the
+     whole **bar** (`meas`…`meas+1`). A note counts if it overlaps
+     `[lo_ppq, hi_ppq)`. The `Grey: Beat / Bar` panel buttons set it. (v0.4
+     drew *every* note in the take — that read as noise / fake inlays.)
   `scan_context` is throttled to every 6th frame unless playing.
 
 ### Let ring (`L`)
@@ -261,10 +278,11 @@ mismatch used to shift the right edge inward).
 - **Two-digit fret amend = 2 undo points** – the first digit's insert is its
   own undo block; the amend (`delete` + re-`insert`) is a second. Ctrl+Z peels
   them one at a time.
-- **`SetMIDIEditorGrid` only moves the grid** – there's no ReaScript setter
-  for the MIDI editor's *note-length* dropdown, so `[` / `]` change the grid.
-  With note length on "Grid" (the default) that's the whole step; with a pinned
-  length it isn't, and the `STEP` label flags which.
+- **`default_note_len` encoding is a guess** – `set_note_len` writes
+  `MIDIEditor_SetSetting_int(hwnd, "default_note_len", qn·tpqn)` on the belief
+  that the value is in ticks and any positive value un-follows the grid. If
+  `[`/`]` don't move the note length in REAPER, verify that. `Alt+[`/`]` →
+  `SetMIDIEditorGrid` is reliable.
 - **`let ring` heuristic** – the ring tail length (`min(max(step×6,2),4)` QN)
   is a guess; a note that's never replayed on its string just rings that long.
 - **`history` / `ring_prev` hold take refs** – `ValidatePtr2`-checked before
@@ -275,11 +293,14 @@ mismatch used to shift the right edge inward).
 - **`step_bar` measure indexing** – assumes `TimeMap2_timeToBeats`' measures
   out and `TimeMap2_beatsToTime`' `measuresIn` use the same base. If bar jumps
   land one bar off, that's the mismatch.
+- **Keyboard layout** – on Windows `Alt+[` still yields `[`; on macOS `Opt+[`
+  yields a different glyph, so the grid shortcut needs remapping there.
 - **Runtime status** – loads and passes a stubbed-API frame harness (`gfx` /
   `reaper` mocked; simulated clicks + key sequences: typed frets & 2-digit
-  amend, tie, let-ring trim, `[`/`]`→`SetMIDIEditorGrid`, undo forwarding,
-  rest, `Q` chord stacking + commit, Ctrl+arrow bar jumps). Not yet run inside
-  REAPER.
+  amend, tie, let-ring trim, `[`/`]`→note-length + `Alt+[`/`]`→grid
+  decoupled, `R` = note-length step vs arrows = grid step, Beat/Bar grey
+  window, undo forwarding, `Q` chord stacking + commit, Ctrl+arrow bar jumps).
+  Not yet run inside REAPER.
 
 ---
 
