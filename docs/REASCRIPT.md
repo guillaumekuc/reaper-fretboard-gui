@@ -29,7 +29,8 @@ instead of `midisend`, `ExtState` instead of hidden sliders.
 | Frame loop         | `@gfx` (host-driven)         | `reaper.defer(loop)` (~30 fps)      |
 | MIDI out           | `midisend` (live thru)       | `MIDI_InsertNote` into editor take  |
 | Preview sound      | pass-through                 | `StuffMIDIMessage` to VKB           |
-| Visualise          | count live note-ons          | read notes from the take            |
+| Visualise          | count live note-ons          | take notes at cursor + `MIDI_GetRecentInputEvent` |
+| Step length        | n/a                          | the MIDI editor's own (`MIDI_GetGrid`) |
 | State persistence  | hidden slider values         | `reaper.SetExtState(..., persist)`  |
 | Threading          | `@gfx`/`@block` split        | single-threaded                     |
 
@@ -50,12 +51,14 @@ function loop()
 
   update_mouse()             -- edge detection: mouse.down / .up / .held
   consumed = false           -- click-routing flag for this frame
-  handle_keys(c)             -- backspace = undo last, space = transport
+  handle_keys(c)             -- backspace = remove last, space = transport
+  poll_live_input()          -- fold hardware MIDI into live_notes
 
   take = get_take()          -- the MIDI editor's active take, or nil
+  -- on a new take: SetOnlyTrackSelected(its track) so VKB previews route there
   sync_cursor_from_edit(take) -- follow the user moving the edit cursor
 
-  scan_take()                -- every 8th frame (or every frame while playing)
+  scan_context(take)         -- every 6th frame (or every frame while playing)
   layout() ; draw_board() ; draw_panel()/draw_header() ; draw_toggle()
   handle_string_drag()       -- retune by dragging open-note labels
   handle_board_click()       -- the main event: preview + insert
@@ -90,17 +93,20 @@ is the lowest string; `pitch_at(s, f) = S.str_note[s] + f`.
 `cursor_qn` — our insertion point, in **project quarter-notes**. It is:
 
 - **initialised** from the edit cursor (`GetCursorPosition` → `timeToQN`),
-  snapped to the editor grid when STEP = "Grid".
-- **advanced** by `step_len_qn(take)` after each inserted note (unless
-  auto-advance is off, or Shift is held → chord entry).
+  snapped to the step length.
+- **advanced** by `step_len_qn(take)` after each inserted note — unless Shift
+  is held (chord entry: insert here, don't move).
 - **re-synced** to the edit cursor whenever the user moves it: each frame,
   `sync_cursor_from_edit` compares `GetCursorPosition()` to
   `last_cursor_time` (the value the script itself last wrote) and, if they
   differ, adopts the user's position. So: click in the MIDI editor to
   reposition, then keep entering from there.
 
-`step_len_qn` returns the fixed value for STEP = 1/4…1/32, or the editor's
-own grid / note-length (`MIDI_GetGrid`) for STEP = "Grid".
+**Step length is REAPER's own, not ours.** `step_len_qn(take)` = the MIDI
+editor's note-length setting, or its grid if that is "follow grid" — exactly
+`MIDI_GetGrid`'s `noteLen`/`grid` returns, the same values REAPER uses for
+keyboard step recording. There is no length control in this GUI; set it with
+the MIDI editor's Length / Grid dropdowns.
 
 `insert_note(pitch, advance)`:
 1. `MIDI_GetPPQPosFromProjQN` for start and start+step,
@@ -118,14 +124,26 @@ entry's `prev`.
 ## 5. Preview & visualisation
 
 - **Preview**: on board press, `StuffMIDIMessage(0, 0x90|chan, pitch, vel)`
-  (mode 0 = virtual-keyboard queue → plays through the record-armed track).
-  Note-off on release, and unconditionally whenever the mouse isn't held.
-  Preview is independent of insertion — with no MIDI editor open, clicks
-  still preview.
-- **Visualisation**: `scan_take()` walks the take's notes (`MIDI_CountEvts` /
-  `MIDI_GetNote`) into two sets — `present` (dim dot) and, during playback,
-  `playing` (bright dot, notes straddling the play cursor). The mouse-preview
-  pitch draws brightest (white). Throttled to every 8th frame unless playing.
+  (mode 0 = virtual-keyboard queue). It plays through whatever track the VKB
+  targets, so when the editor's take changes the script does
+  `SetOnlyTrackSelected` on that take's track. You still need the track
+  **armed + input-monitoring** to hear it — same as keyboard step input — and
+  the status line says so when it isn't. Note-off on release and whenever the
+  mouse isn't held. Preview works with no MIDI editor open.
+- **Visualisation** — the board lights, brightest first:
+  1. **mouse preview** pitch → white.
+  2. **live hardware MIDI** (`live_notes`) → bright. `poll_live_input()` reads
+     `MIDI_GetRecentInputEvent` (REAPER 7+): each frame it walks events newer
+     than `last_input_seq`, applying note-on/off to `live_notes`. This restores
+     the JSFX version's "see what you play" — from any input device, no
+     routing needed. (Piano-roll *mouse* preview isn't hardware input, so it
+     doesn't show.)
+  3. **playback** notes straddling the play cursor → bright.
+  4. **take notes in the current step slot** (`scan_context`) → dim. This
+     replaced v0.4's "every note in the take as a grey dot", which read as
+     noise / fake inlays. Now the board only shows what's *at the cursor*, so
+     arrowing through the take reveals each chord.
+  `scan_context` is throttled to every 6th frame unless playing.
 
 ---
 
@@ -155,10 +173,19 @@ string-label drag → fretboard).
   editing.
 - **Lua 5.4** (REAPER 7) – `//`, `&`, `~`, integer/float distinction. The
   code floors on `ExtState` save so no `%d`-format surprises.
-- **Preview routing** – `StuffMIDIMessage` mode 0 goes to whatever the
-  virtual keyboard targets (usually the last-touched / armed track), not
-  necessarily the MIDI editor's track. Good enough for feedback; not a
-  guarantee.
+- **Preview needs a monitored track** – `StuffMIDIMessage` mode 0 → the
+  script `SetOnlyTrackSelected`s the take's track so the VKB routes there, but
+  you still hear nothing unless that track is armed + input-monitoring. The
+  status line flags this. (Same requirement as REAPER's own keyboard step
+  input.) Selecting the track is a side effect worth knowing about.
+- **`MIDI_GetRecentInputEvent` is REAPER 7+** – guarded by `HAS_INPUT_POLL`;
+  on older builds the live-input highlight silently does nothing. It sees
+  hardware input only, not the piano roll's own mouse-preview.
+- **`&` precedence in Lua** – `a & b == c` parses as `a & (b == c)`. All bit
+  tests are parenthesised: `(GetPlayState() & 1) == 1`. Watch this when
+  editing.
+- **Lua 5.4** (REAPER 7) – `//`, `&`, `~`, integer/float distinction. The
+  code floors on `ExtState` save so no `%d`-format surprises.
 - **Editor refresh** – after `MIDI_InsertNote` + `MIDI_Sort` the editor
   redraws on its own next paint. If a note ever seems to lag a frame, add an
   explicit `MIDIEditor_OnCommand` refresh.
@@ -166,10 +193,11 @@ string-label drag → fretboard).
   time), but it fills the undo history fast during long entry.
 - **`history` holds take references** – validated with `ValidatePtr2` before
   use, but closing the item mid-session orphans older entries (they no-op).
-- **No polyphonic mouse** – still one pointer. Chord entry is
-  Shift+click (insert without advancing), not simultaneous notes.
+- **No polyphonic mouse** – still one pointer. Chord entry is Shift+click
+  (insert without advancing), not simultaneous notes.
 - **Runtime status** – loads and passes a stubbed-API frame harness
-  (`gfx`/`reaper` mocked, simulated clicks/keys). Not yet run inside REAPER.
+  (`gfx`/`reaper` mocked; simulated clicks, keys, and a live note-on/off).
+  Not yet run inside REAPER.
 
 ---
 
@@ -177,10 +205,9 @@ string-label drag → fretboard).
 
 | Want to… | Touch |
 |----------|-------|
-| Add a tuning preset | `TUNINGS` + (rule presets are automatic) |
-| Add a step length | `STEP_LABELS` + `STEP_QN` (parallel arrays) |
+| Add a tuning preset | `TUNINGS` (rule presets are automatic) |
 | Insert chords from one click | collect pitches, insert all at `cursor_qn`, advance once |
-| Read the editor's active channel / note length | `MIDIEditor_GetSetting_int(hwnd, ...)` in `insert_note` |
-| Show the step cursor on the board | it's a time position, not a fret — draw a marker column, or a bar:beat readout (already in the status line) |
-| Honour editor grid triplet/swing | `MIDI_GetGrid` returns swing; fold into `step_len_qn` |
-| Toolbar toggle state (highlight while open) | add the `SetToggleCommandState` / `RefreshToolbar` pair around `loop`/`on_exit` |
+| Use the editor's active channel instead of `S.chan` | `MIDIEditor_GetSetting_int(hwnd, "default_note_chan")` in `insert_note` |
+| Honour editor grid swing | `MIDI_GetGrid` returns swing; fold into `step_len_qn` |
+| Toolbar toggle state (highlight while open) | `SetToggleCommandState` / `RefreshToolbar` around `loop`/`on_exit` |
+| Also show live input from a specific track's record input | there's no direct API; `MIDI_GetRecentInputEvent` is all-devices |

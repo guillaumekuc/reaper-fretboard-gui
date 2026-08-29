@@ -27,15 +27,17 @@ if you like).
 
 Open a MIDI item in the MIDI editor, place the edit cursor, run the script.
 Click a fret → the note is inserted at the cursor and the cursor advances by
-the **STEP** length; the click also previews audibly through the
-record-armed track.
+**the MIDI editor's own step length** (its Length / Grid setting — the same
+value REAPER uses for keyboard step input). The click also previews audibly.
 
 - **Shift+click** – insert without advancing (chord entry).
 - **Backspace** – remove the last inserted note and step back.
 - **Space** – transport play/stop.
 - Move the edit cursor in the MIDI editor to reposition; the script follows.
-- Notes already in the take show as dim dots; notes under the play cursor
-  light up during playback.
+- The board lights up: notes at the cursor (dim), notes you play on a MIDI
+  keyboard (bright), notes under the play cursor during playback (bright).
+- Previews are audible only if the take's track is **armed + monitoring**
+  (same as keyboard step input); the panel says so when it isn't.
 
 ## Install / use (JSFX version — `master`)
 
@@ -52,8 +54,8 @@ script).
 
 Panel controls: tuning preset, string count (3–9), fret count (5–30, default
 22), inlays (none / standard / capsule), note-name display, MIDI channel,
-velocity — plus, on the ReaScript version, the STEP length and an
-auto-advance toggle.
+velocity. (Note length / step length is the MIDI editor's own setting, not a
+control here.)
 
 **Tuning** is per-string. Drag a string's open-note label up or down to
 retune it. Presets just fill the fields: "Standard" sets 6-string EADGBE and
@@ -71,10 +73,11 @@ string 1 to transpose to any root.
 
 ## Status
 
-**ReaScript `v0.4.0` (this branch)** — fretboard window that inserts notes
-into the active MIDI editor take (step / chord entry), previews audibly, and
-lights up the take's notes. Passes a stubbed-API frame harness; not yet run
-inside REAPER. Rough edges in `docs/REASCRIPT.md §7`.
+**ReaScript `v0.5.0` (this branch)** — fretboard window that inserts notes
+into the active MIDI editor take (step / chord entry) using REAPER's own step
+length, previews audibly, and lights up notes at the cursor + live keyboard
+input + playback. Passes a stubbed-API frame harness; not yet run inside
+REAPER. Rough edges in `docs/REASCRIPT.md §7`.
 
 **JSFX `v0.3.0` (`master`)** — all settings in the plugin GUI, drag-to-retune,
 greyscale UI. Live MIDI thru + click-to-send only (no editor insertion).
