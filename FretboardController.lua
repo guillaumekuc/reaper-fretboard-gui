@@ -1,6 +1,6 @@
 --[[
   Fretboard MIDI Controller  (ReaScript / Lua)
-  version 0.9.8-dbg
+  version 0.9.9-dbg
 
   A guitar-fretboard window that inserts notes into the take open in the active
   MIDI editor, Guitar-Pro-style: pick a string, type a fret, it writes the note
@@ -403,10 +403,12 @@ local function tie_extend()
   set_cursor((cursor_qn or 0) + step)
 end
 
+local TWODIGIT_WINDOW = 0.4   -- seconds: a 2nd digit within this = a 2-digit fret
+
 local function type_fret(d)
   if d > S.num_frets then return end
   local now = reaper.time_precise()
-  if digit_pending and (now - digit_time) < 0.8 then
+  if digit_pending and (now - digit_time) < TWODIGIT_WINDOW then
     local combined = digit_pending * 10 + d
     if combined <= S.num_frets then
       reaper.Undo_BeginBlock()
@@ -879,7 +881,7 @@ local function loop()
       (mouse.cap & 16) ~= 0 and " alt" or "")
     last_key_time = reaper.time_precise()
   end
-  if digit_pending and (reaper.time_precise() - digit_time) > 0.8 then digit_pending = nil end
+  if digit_pending and (reaper.time_precise() - digit_time) > TWODIGIT_WINDOW then digit_pending = nil end
   handle_keys(c)
   poll_live_input()
 
