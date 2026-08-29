@@ -1,6 +1,6 @@
 --[[
   Fretboard MIDI Controller  (ReaScript / Lua)
-  version 0.9.5-dbg
+  version 0.9.6-dbg
 
   A guitar-fretboard window that inserts notes into the take open in the active
   MIDI editor, Guitar-Pro-style: pick a string, type a fret, it writes the note
@@ -27,12 +27,13 @@
     space          transport play/stop
     shift+click    insert without advancing (chord entry)
 
-  Grid and note length are REAPER's own MIDI-editor settings, modified in place:
-  grid via SetMIDIEditorGrid, note length via the "Set length for next inserted
-  note: 1/N" actions (found at startup - needs the SWS extension). Nothing is
-  stored locally. Grid = caret movement & snap; note length = the length of
-  inserted notes and how far a note advances the caret. Without SWS the NOTE
-  control falls back to the grid.
+  Grid and note length are REAPER's own MIDI-editor settings. The , . and - =
+  keys (and the panel GRID / NOTE +/- buttons) step through REAPER's own
+  "Grid: set to 1/N" and "Set length for next inserted note: 1/N" actions,
+  which are discovered from the action list at startup (needs the SWS
+  extension). Nothing is stored locally. Grid = caret movement & snap;
+  note length = the length of inserted notes and how far a note advances the
+  caret. Without SWS the NOTE control falls back to the grid.
 
   See docs/REASCRIPT.md for the architecture.
 ]]--
@@ -179,50 +180,68 @@ end
 
 local DBG = ""
 
--- set the MIDI editor GRID: halve / double the current QN division
-local function set_grid(take, finer)
-  if not take or not reaper.SetMIDIEditorGrid then return end
-  local g = grid_qn(take)
-  local target = clamp(finer and g / 2 or g * 2, 1 / 32, 16)   -- 1/128 note .. 4 whole notes
-  reaper.SetMIDIEditorGrid(0, target)
-  DBG = string.format("grid %s: %.4f -> asked %.4f  now %.4f",
-    finer and "finer" or "wider", g, target, grid_qn(take))
+-- true when n is 1 or a power of two (musical note denominators)
+local function pow2(n) return n == 1 or (n > 0 and (n & (n - 1)) == 0) end
+
+-- MIDI-editor actions "Grid: set to X" and "Set length for next inserted note: X",
+-- discovered from the action list at startup (needs the SWS extension).
+-- Each list is sorted finest -> coarsest; .v is the value as a fraction of a
+-- whole note (1/16 note -> 0.0625, whole note -> 1, two whole notes -> 2).
+local grid_actions, notelen_actions = {}, {}
+
+local function parse_note_value(s)
+  local a, b = s:match("^(%d+)/(%d+)$")
+  if a and pow2(tonumber(b)) then return tonumber(a) / tonumber(b) end
+  local w = s:match("^(%d+)$")
+  if w and pow2(tonumber(w)) then return tonumber(w) end
 end
 
--- "Set length for next inserted note: 1/N" actions, discovered at startup (needs SWS)
-local notelen_actions = {}   -- QN value -> MIDI editor command id
-local function scan_notelen_actions()
+local function scan_actions()
   if not reaper.CF_GetCommandText then return end
-  for cmd = 40000, 43000 do
+  for cmd = 40000, 43200 do
     local txt = reaper.CF_GetCommandText(MIDI_SECTION, cmd)
-    if txt and txt ~= "" and txt:find("ength for next inserted note", 1, true) then
-      local n = txt:match(".-1/(%d+)%s*$")            -- plain "1/N" only (skip dotted / triplet)
-      if n then notelen_actions[4 / tonumber(n)] = cmd end
-      if txt:match("[:%s]1%s*$") then notelen_actions[4] = cmd end   -- "...: 1" = whole note
+    if txt and txt ~= "" then
+      local gv = txt:match("^Grid: [Ss]et to (%S+)%s*$")
+      local lv = txt:match("[Ll]ength for next inserted note:%s*(%S+)%s*$")
+      if gv then local v = parse_note_value(gv); if v then grid_actions[#grid_actions+1] = {v=v, cmd=cmd} end end
+      if lv then local v = parse_note_value(lv); if v then notelen_actions[#notelen_actions+1] = {v=v, cmd=cmd} end end
     end
   end
+  local by_v = function(p, q) return p.v < q.v end
+  table.sort(grid_actions, by_v); table.sort(notelen_actions, by_v)
 end
 
--- set the MIDI editor NOTE LENGTH: nearest "set length" action to half / double
--- current; falls back to the grid if the actions weren't found
+-- step one entry finer / wider through an action list, starting from the entry
+-- nearest the current value (`cur_wn` = current value as fraction of a whole note)
+local function step_actions(list, hwnd, cur_wn, finer, label)
+  if #list == 0 or not hwnd then DBG = label .. ": no actions (need SWS)"; return false end
+  local idx, bd = 1, 1e9
+  for i, a in ipairs(list) do
+    local d = math.abs(a.v - cur_wn)
+    if d < bd then bd, idx = d, i end
+  end
+  idx = clamp(idx + (finer and -1 or 1), 1, #list)
+  reaper.MIDIEditor_OnCommand(hwnd, list[idx].cmd)
+  DBG = string.format("%s %s -> 1/%g (cmd %d)", label, finer and "finer" or "wider",
+    1 / list[idx].v, list[idx].cmd)
+  return true
+end
+
 local NOTELEN_OK = nil
+local function set_grid(take, hwnd, finer)
+  if not take then return end
+  if #grid_actions > 0 then
+    step_actions(grid_actions, hwnd, grid_qn(take) / 4, finer, "grid")
+  elseif reaper.SetMIDIEditorGrid then
+    local g = grid_qn(take)
+    reaper.SetMIDIEditorGrid(0, clamp(finer and g / 2 or g * 2, 1 / 32, 16))
+    DBG = string.format("grid via SetMIDIEditorGrid (no actions): %.3f", grid_qn(take))
+  end
+end
 local function set_note_len(take, hwnd, finer)
   if not take then return end
-  local target = clamp(finer and step_len_qn(take) / 2 or step_len_qn(take) * 2, 1 / 32, 4)
-  local best, bestd
-  for qn, cmd in pairs(notelen_actions) do
-    local d = math.abs(qn - target)
-    if not bestd or d < bestd then bestd, best = d, cmd end
-  end
-  if best and hwnd then
-    reaper.MIDIEditor_OnCommand(hwnd, best)
-    NOTELEN_OK = true
-    DBG = string.format("notelen -> action %d (target %.4f)", best, target)
-  else
-    NOTELEN_OK = false
-    DBG = "notelen: no 'set length' actions found (need SWS) -> grid"
-    set_grid(take, finer)
-  end
+  NOTELEN_OK = step_actions(notelen_actions, hwnd, step_len_qn(take) / 4, finer, "notelen")
+  if not NOTELEN_OK then set_grid(take, hwnd, finer) end
 end
 
 local function as_frac(qn)
@@ -689,10 +708,10 @@ local function draw_panel(take)
 
   -- GRID and NOTE LENGTH steppers (- shorter / + longer)
   caption(630, 38, "GRID")
-  if btn(662, 34, 17, 16, "-", false) then set_grid(take, true)  end
+  if btn(662, 34, 17, 16, "-", false) then set_grid(take, hwnd, true)  end
   gfx.set(0.86, 0.86, 0.89); gfx.x = 684; gfx.y = 38
   gfx.drawstr(take and as_frac(grid_qn(take)) or "-")
-  if btn(724, 34, 17, 16, "+", false) then set_grid(take, false) end
+  if btn(724, 34, 17, 16, "+", false) then set_grid(take, hwnd, false) end
 
   caption(756, 38, "NOTE")
   if btn(790, 34, 17, 16, "-", false) then set_note_len(take, hwnd, true)  end
@@ -726,10 +745,10 @@ local function draw_panel(take)
     gfx.drawstr("key: " .. last_key)
   end
   gfx.set(0.50, 0.50, 0.42); gfx.x = 10; gfx.y = 100      -- grid / note-length diagnostic
-  local nla = 0; for _ in pairs(notelen_actions) do nla = nla + 1 end
-  gfx.drawstr(string.format("dbg: grid=%.3f notelen=%.3f  len-actions=%d  %s",
+  gfx.drawstr(string.format("dbg: gridQN=%.3f noteQN=%.3f  actions g=%d n=%d  %s",
     take and grid_qn(take) or 0,
-    take and (select(3, reaper.MIDI_GetGrid(take)) or 0) or 0, nla, DBG))
+    take and (select(3, reaper.MIDI_GetGrid(take)) or 0) or 0,
+    #grid_actions, #notelen_actions, DBG))
 
   gfx.x = 10; gfx.y = PANEL_H - 20
   if take then
@@ -836,8 +855,8 @@ local function handle_keys(c)
   elseif c == string.byte("r") or c == string.byte("R") then step_cursor(1, "note")
   elseif c == string.byte("t") or c == string.byte("T") then tie_extend()
   elseif c == string.byte("l") or c == string.byte("L") then S.let_ring = 1 - S.let_ring; ring_prev = {}
-  elseif c == string.byte(",") or c == string.byte("<") then set_grid(take, true)      -- grid finer
-  elseif c == string.byte(".") or c == string.byte(">") then set_grid(take, false)     -- grid wider
+  elseif c == string.byte(",") or c == string.byte("<") then set_grid(take, hwnd, true)      -- grid finer
+  elseif c == string.byte(".") or c == string.byte(">") then set_grid(take, hwnd, false)     -- grid wider
   elseif c == string.byte("-") or c == string.byte("_") then set_note_len(take, hwnd, true)   -- shorter note
   elseif c == string.byte("=") or c == string.byte("+") then set_note_len(take, hwnd, false)  -- longer note
   elseif c == K.CZ then reaper.Main_OnCommand(40029, 0)
@@ -913,7 +932,7 @@ local function on_exit()
 end
 
 load_state()
-scan_notelen_actions()
+scan_actions()
 local d, x, y, w, h = 0, 120, 120, 1040, 320
 local wnd = reaper.GetExtState(SECT, "wnd")
 if wnd ~= "" then
