@@ -1,30 +1,59 @@
 # Fretboard MIDI Controller (REAPER)
 
-A JSFX plugin (`Fretboard.jsfx`) that draws a guitar fretboard in the FX window.
-It **visualises** incoming MIDI (played notes light up on every position where
-that pitch occurs) and lets you **input** MIDI by clicking positions on the
-board.
+A guitar fretboard for REAPER that **visualises** MIDI and lets you **input**
+MIDI by clicking the board.
 
-## Install
+Two implementations:
 
-Copy `Fretboard.jsfx` into your REAPER effects folder, e.g.
-`%APPDATA%\REAPER\Effects\Guillaume\Fretboard.jsfx`
-(already done on this machine), then in REAPER: add FX → JS → **Fretboard MIDI
-Controller**.
+| | `Fretboard.jsfx` (branch `master`) | `FretboardController.lua` (this branch) |
+|---|---|---|
+| Kind | JSFX effect, in a track's FX chain | ReaScript action |
+| Input target | live MIDI thru (record it) | **inserts notes into the MIDI editor take** (step-entry) |
+| Visualises | incoming live MIDI | notes already in the take |
+| Docs | `ARCHITECTURE.md` | `docs/REASCRIPT.md` |
 
-## Use
+This branch (`reascript-step-input`) exists so clicking a fret can write a
+note straight into the piano roll — see `docs/REASCRIPT.md` for why the JSFX
+version can't and how the port works.
 
-Put it on a MIDI track. Route the track output to an instrument to hear your
-clicks, or arm the track for recording to capture them. Incoming MIDI passes
-through unchanged and is mirrored on the board.
+## Install (ReaScript)
 
-**All controls are in the plugin's own GUI** — REAPER shows no native slider
-panel. Click **settings** (top-right) to open the panel; **hide** to collapse
-it back to just the fretboard. Everything persists with the FX state.
+Copy `FretboardController.lua` into `%APPDATA%\REAPER\Scripts\` (already done
+on this machine at `Scripts\Guillaume\`), then in REAPER: **Actions → Load
+ReaScript…**, pick the file, and run it (assign a shortcut / toolbar button
+if you like).
+
+## Use (ReaScript)
+
+Open a MIDI item in the MIDI editor, place the edit cursor, run the script.
+Click a fret → the note is inserted at the cursor and the cursor advances by
+the **STEP** length; the click also previews audibly through the
+record-armed track.
+
+- **Shift+click** – insert without advancing (chord entry).
+- **Backspace** – remove the last inserted note and step back.
+- **Space** – transport play/stop.
+- Move the edit cursor in the MIDI editor to reposition; the script follows.
+- Notes already in the take show as dim dots; notes under the play cursor
+  light up during playback.
+
+## Install / use (JSFX version — `master`)
+
+Copy `Fretboard.jsfx` into `%APPDATA%\REAPER\Effects\`, add FX → JS →
+**Fretboard MIDI Controller** on a MIDI track. Incoming MIDI passes through
+unchanged and is mirrored on the board; clicking sends live MIDI (record the
+track's MIDI output to capture it).
+
+## Settings panel (both versions)
+
+Click **settings** (top-right) to open the control panel; **hide** to collapse
+to just the fretboard. Settings persist (FX state for JSFX, `ExtState` for the
+script).
 
 Panel controls: tuning preset, string count (3–9), fret count (5–30, default
-22), inlays (none / standard / capsule), note-name display, MIDI-out channel,
-click velocity.
+22), inlays (none / standard / capsule), note-name display, MIDI channel,
+velocity — plus, on the ReaScript version, the STEP length and an
+auto-advance toggle.
 
 **Tuning** is per-string. Drag a string's open-note label up or down to
 retune it. Presets just fill the fields: "Standard" sets 6-string EADGBE and
@@ -35,17 +64,20 @@ string 1 to transpose to any root.
 
 ## For developers
 
-`ARCHITECTURE.md` is the orientation doc — read it before the code. It covers
-why JSFX, the section/threading model the code is bound to, the data flows,
-the memory map, and the names worth tracking.
+- `docs/REASCRIPT.md` — orientation for `FretboardController.lua` (this
+  branch): the `defer` loop, the step cursor, MIDI-editor insertion, and what
+  the port shares with / changes from the JSFX version.
+- `ARCHITECTURE.md` — orientation for the JSFX version (`master`).
 
 ## Status
 
-v0.3.0 — all settings moved into the plugin GUI (native params hidden),
-drag-to-retune, greyscale UI, 22-fret default. Not yet play-tested in REAPER
-after this rewrite. Known rough edges: mouse input is monophonic; GUI→MIDI
-events are queued to the audio thread without locking; no hung-note safety;
-panel layout is fixed-pixel (doesn't reflow on resize).
+**ReaScript `v0.4.0` (this branch)** — fretboard window that inserts notes
+into the active MIDI editor take (step / chord entry), previews audibly, and
+lights up the take's notes. Passes a stubbed-API frame harness; not yet run
+inside REAPER. Rough edges in `docs/REASCRIPT.md §7`.
+
+**JSFX `v0.3.0` (`master`)** — all settings in the plugin GUI, drag-to-retune,
+greyscale UI. Live MIDI thru + click-to-send only (no editor insertion).
 
 ---
 
