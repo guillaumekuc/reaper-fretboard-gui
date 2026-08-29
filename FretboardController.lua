@@ -1,6 +1,6 @@
 --[[
   Fretboard MIDI Controller  (ReaScript / Lua)
-  version 0.9.3
+  version 0.9.4-dbg
 
   A guitar-fretboard window that inserts notes into the take open in the active
   MIDI editor, Guitar-Pro-style: pick a string, type a fret, it writes the note
@@ -182,9 +182,14 @@ local function step_dir(denom, finer)
 end
 
 -- set the MIDI editor GRID one note value finer / wider
+local DBG = ""
 local function set_grid(take, finer)
   if not take or not reaper.SetMIDIEditorGrid then return end
-  reaper.SetMIDIEditorGrid(0, 4 / step_dir(denom_of(grid_qn(take)), finer))
+  local g0     = grid_qn(take)
+  local target = 4 / step_dir(denom_of(g0), finer)
+  reaper.SetMIDIEditorGrid(0, target)
+  DBG = string.format("setgrid %s -> asked %.4f  now %.4f",
+    finer and "finer" or "wider", target, grid_qn(take))
 end
 
 -- set the MIDI editor NOTE LENGTH one note value finer / wider (direct;
@@ -193,13 +198,18 @@ local NOTELEN_OK = nil   -- nil = untested, then true/false
 local function set_note_len(take, hwnd, finer)
   if not take then return end
   local target_qn = 4 / step_dir(denom_of(step_len_qn(take)), finer)
+  local ticks = math.floor(target_qn * tpqn_of(take) + 0.5)
   if hwnd and reaper.MIDIEditor_SetSetting_int and reaper.MIDIEditor_GetSetting_int then
     local before = reaper.MIDIEditor_GetSetting_int(hwnd, "default_note_len")
-    reaper.MIDIEditor_SetSetting_int(hwnd, "default_note_len",
-      math.floor(target_qn * tpqn_of(take) + 0.5))
-    NOTELEN_OK = reaper.MIDIEditor_GetSetting_int(hwnd, "default_note_len") ~= before
+    reaper.MIDIEditor_SetSetting_int(hwnd, "default_note_len", ticks)
+    local after = reaper.MIDIEditor_GetSetting_int(hwnd, "default_note_len")
+    NOTELEN_OK = after ~= before
+    DBG = string.format("setnl asked %d ticks  before %s  after %s  setInt=%s",
+      ticks, tostring(before), tostring(after),
+      tostring(reaper.MIDIEditor_SetSetting_int ~= nil))
   else
     NOTELEN_OK = false
+    DBG = "setnl: MIDIEditor_SetSetting_int/GetSetting_int not available  hwnd=" .. tostring(hwnd ~= nil)
   end
   if not NOTELEN_OK then set_grid(take, finer) end   -- no note-length setter -> the grid
 end
@@ -508,7 +518,7 @@ end
 -- ============================================================ drawing ====
 
 local L, R, T, B, boardw, boardh, fret_sp, str_sp, nr, ir, header_h
-local PANEL_H = 128
+local PANEL_H = 146
 local drag_s, drag_y0, drag_n0 = -1, 0, 0
 
 local function str_y(s)  return gfx.h - B - (s - 1) * str_sp end
@@ -678,7 +688,7 @@ local function draw_panel(take)
   gfx.drawstr(take and as_frac(step_len_qn(take)) or "-")
   if btn(852, 34, 17, 16, "+", false) then set_note_len(take, hwnd, false) end
   if NOTELEN_OK == false then
-    gfx.set(0.58, 0.50, 0.40); gfx.x = 884; gfx.y = 38; gfx.drawstr("(=grid)")
+    gfx.set(0.58, 0.50, 0.40); gfx.x = 884; gfx.y = 38; gfx.drawstr("(NL not settable - using grid)")
   end
 
   caption(10, 63, "INLAYS")
@@ -698,11 +708,15 @@ local function draw_panel(take)
   if btn(688, 60, 46, bh, "Beat", S.ctx_mode == 0) then S.ctx_mode = 0 end
   if btn(737, 60, 42, bh, "Bar",  S.ctx_mode == 1) then S.ctx_mode = 1 end
 
-  gfx.set(0.44, 0.44, 0.47); gfx.x = 10; gfx.y = 84; gfx.drawstr(HINTS)
+  gfx.set(0.44, 0.44, 0.47); gfx.x = 10; gfx.y = 82; gfx.drawstr(HINTS)
   if reaper.time_precise() - last_key_time < 3 then      -- key diagnostic (last press)
-    gfx.set(0.62, 0.58, 0.35); gfx.x = gfx.w - 180; gfx.y = 84
+    gfx.set(0.62, 0.58, 0.35); gfx.x = gfx.w - 180; gfx.y = 82
     gfx.drawstr("key: " .. last_key)
   end
+  gfx.set(0.50, 0.50, 0.42); gfx.x = 10; gfx.y = 100      -- grid / note-length diagnostic
+  gfx.drawstr("dbg: MIDI_GetGrid=" .. (take and string.format("%.4f", grid_qn(take)) or "-")
+    .. "   MGN=" .. (take and select(3, reaper.MIDI_GetGrid(take)) or "-")
+    .. "   " .. DBG)
 
   gfx.x = 10; gfx.y = PANEL_H - 20
   if take then
