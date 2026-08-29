@@ -30,6 +30,9 @@ Click a fret → the note is inserted at the cursor and the cursor advances by
 **the MIDI editor's own step length** (its Length / Grid setting — the same
 value REAPER uses for keyboard step input). The click also previews audibly.
 
+- **← / →** – move the step cursor back / forward one step without inserting
+  (→ leaves a rest). These are here because clicking the window takes focus
+  off the MIDI editor, so its own arrow keys stop working.
 - **Shift+click** – insert without advancing (chord entry).
 - **Backspace** – remove the last inserted note and step back.
 - **Space** – transport play/stop.

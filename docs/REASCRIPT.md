@@ -51,7 +51,7 @@ function loop()
 
   update_mouse()             -- edge detection: mouse.down / .up / .held
   consumed = false           -- click-routing flag for this frame
-  handle_keys(c)             -- backspace = remove last, space = transport
+  handle_keys(c)             -- arrows = step cursor, bksp = remove last, space = transport
   poll_live_input()          -- fold hardware MIDI into live_notes
 
   take = get_take()          -- the MIDI editor's active take, or nil
@@ -96,6 +96,11 @@ is the lowest string; `pitch_at(s, f) = S.str_note[s] + f`.
   snapped to the step length.
 - **advanced** by `step_len_qn(take)` after each inserted note — unless Shift
   is held (chord entry: insert here, don't move).
+- **nudged** by `step_cursor(±1)` on the **Left / Right arrow keys** — move
+  one step with no note (Right = leave a rest, Left = back up). These keys
+  exist because clicking the fretboard window pulls focus off the MIDI
+  editor, so its own arrow-key cursor moves stop reaching it. Backspace
+  (remove last note + step back) is separate.
 - **re-synced** to the edit cursor whenever the user moves it: each frame,
   `sync_cursor_from_edit` compares `GetCursorPosition()` to
   `last_cursor_time` (the value the script itself last wrote) and, if they
@@ -181,6 +186,12 @@ string-label drag → fretboard).
 - **`MIDI_GetRecentInputEvent` is REAPER 7+** – guarded by `HAS_INPUT_POLL`;
   on older builds the live-input highlight silently does nothing. It sees
   hardware input only, not the piano roll's own mouse-preview.
+- **Focus steals editor keys** – clicking the fretboard window makes it the
+  key focus, so the MIDI editor's own arrow/Backspace/etc. stop working while
+  you're on the fretboard. Only the keys `handle_keys` explicitly re-maps
+  (arrows, Backspace, Space) are covered. Arrow keycodes are the big magic
+  constants `KEY_LEFT = 1818584692`, `KEY_RIGHT = 1919379572` (`gfx.getchar`
+  values, not ASCII).
 - **`&` precedence in Lua** – `a & b == c` parses as `a & (b == c)`. All bit
   tests are parenthesised: `(GetPlayState() & 1) == 1`. Watch this when
   editing.

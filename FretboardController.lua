@@ -12,8 +12,12 @@
 
   Run it as an action (Actions > Load ReaScript...). Open a MIDI item in the
   MIDI editor, place the edit cursor, then click the fretboard.
-  Shift+click inserts without advancing (chord entry). Backspace removes the
-  last note. Space toggles transport.
+    - shift+click   insert without advancing (chord entry)
+    - left / right  move the step cursor back / forward one step (right = rest)
+    - backspace     remove the last inserted note and step back
+    - space         transport play/stop
+  Arrow keys are here because clicking the window takes focus off the MIDI
+  editor, so its own arrow-key cursor moves stop working.
 
   See docs/REASCRIPT.md for the architecture.
 ]]--
@@ -198,6 +202,16 @@ local function delete_last()
     end
   end
   cursor_qn = h.prev
+  last_cursor_time = reaper.TimeMap2_QNToTime(0, cursor_qn)
+  reaper.SetEditCurPos(last_cursor_time, false, false)
+end
+
+-- move the step cursor by dir * one step, inserting nothing (dir = +1 rest / -1 back)
+local function step_cursor(dir)
+  local take = get_take()
+  if not take then return end
+  if not cursor_qn then sync_cursor_from_edit(take) end
+  cursor_qn = math.max(0, cursor_qn + dir * step_len_qn(take))
   last_cursor_time = reaper.TimeMap2_QNToTime(0, cursor_qn)
   reaper.SetEditCurPos(last_cursor_time, false, false)
 end
@@ -470,7 +484,8 @@ local function draw_panel(take)
     local q = step_len_qn(take)
     len = string.format("  step %.3f QN", q)
     gfx.drawstr("Insert into: " .. (nm ~= "" and nm or "MIDI editor take")
-      .. where .. len .. "   shift+click = chord" .. monitor_hint(take))
+      .. where .. len .. "     arrows = step / rest   shift+click = chord   bksp = remove last"
+      .. monitor_hint(take))
   else
     gfx.set(0.60, 0.50, 0.45)
     gfx.drawstr("No MIDI editor open - clicks only preview. Open a MIDI item in the MIDI editor.")
@@ -479,7 +494,7 @@ end
 
 local function draw_header(take)
   gfx.set(0.40, 0.40, 0.43); gfx.x = 8; gfx.y = 6
-  gfx.drawstr(take and "Fretboard - click a fret to insert at the edit cursor  (shift = chord)"
+  gfx.drawstr(take and "Fretboard - click to insert  .  arrows = step/rest  .  shift+click = chord  .  bksp = remove"
                     or "Fretboard - open a MIDI item in the MIDI editor to insert notes")
   gfx.set(0.22, 0.22, 0.25); gfx.line(0, header_h, gfx.w, header_h)
 end
@@ -528,9 +543,14 @@ local function handle_board_click()
   insert_note(p, (mouse.cap & 8) == 0)   -- shift held -> chord (no advance)
 end
 
+local KEY_LEFT, KEY_RIGHT = 1818584692, 1919379572
+
 local function handle_keys(c)
-  if c == 8 or c == 6579564 then delete_last()
-  elseif c == 32 then reaper.Main_OnCommand(40044, 0) end
+  if c == 8 or c == 6579564 then delete_last()          -- backspace / delete: remove last note
+  elseif c == KEY_RIGHT then step_cursor(1)             -- advance one step (leave a rest)
+  elseif c == KEY_LEFT  then step_cursor(-1)            -- go back one step
+  elseif c == 32 then reaper.Main_OnCommand(40044, 0)   -- space: transport
+  end
 end
 
 -- ============================================================= main ======
