@@ -1,6 +1,6 @@
 --[[
   Fretboard MIDI Controller  (ReaScript / Lua)
-  version 0.9.2
+  version 0.9.3
 
   A guitar-fretboard window that inserts notes into the take open in the active
   MIDI editor, Guitar-Pro-style: pick a string, type a fret, it writes the note
@@ -19,8 +19,8 @@
                    advancing; press Q again to commit the chord and move on
     R              rest: advance by one NOTE LENGTH, insert nothing
     T              tie: lengthen the last note by one note length and advance
-    [  ]  (- =)  or ctrl+up/down   halve / double the MIDI editor NOTE LENGTH
-    alt+[  alt+]  or alt+up/down    halve / double the MIDI editor GRID
+    , .            MIDI editor GRID finer / wider      (or the panel GRID +/- )
+    - =   ctrl+up/down   MIDI editor NOTE LENGTH shorter / longer  (panel NOTE +/- )
     L              "let ring" on/off  (notes sustain until the string is replayed)
     backspace      remove the last inserted note and step back
     ctrl+Z / Y     undo / redo
@@ -30,7 +30,8 @@
   Grid and note length are REAPER's own MIDI-editor settings, modified in place
   (SetMIDIEditorGrid / MIDIEditor_SetSetting_int) - nothing is stored locally.
   Grid = caret movement & snap; note length = the length of inserted notes and
-  how far a note advances the caret.
+  how far a note advances the caret. If this REAPER can't set the note length,
+  the NOTE control falls back to the grid (panel shows "=grid").
 
   See docs/REASCRIPT.md for the architecture.
 ]]--
@@ -174,25 +175,33 @@ local function tpqn_of(take)
   return (d and d > 0) and d or 960
 end
 
--- alt+[ / alt+] (and alt+up/down): the MIDI editor grid, directly
-local function set_grid(take, mult)
-  if take and reaper.SetMIDIEditorGrid then
-    reaper.SetMIDIEditorGrid(0, clamp(grid_qn(take) * mult, 1 / 64, 4))
-  end
+-- nearest 1/n note value for a QN length, as an integer denominator
+local function denom_of(qn) return clamp(math.floor(4 / qn + 0.5), 1, 128) end
+local function step_dir(denom, finer)
+  return finer and clamp(denom * 2, 1, 128) or clamp(math.floor(denom / 2), 1, 128)
 end
 
--- [ / ] (and ctrl+up/down): the MIDI editor's note-length setting, directly.
--- Falls back to changing the grid if this REAPER can't set the note length.
-local function set_note_len(take, hwnd, mult)
+-- set the MIDI editor GRID one note value finer / wider
+local function set_grid(take, finer)
+  if not take or not reaper.SetMIDIEditorGrid then return end
+  reaper.SetMIDIEditorGrid(0, 4 / step_dir(denom_of(grid_qn(take)), finer))
+end
+
+-- set the MIDI editor NOTE LENGTH one note value finer / wider (direct;
+-- falls back to the grid if this REAPER can't set the note length)
+local NOTELEN_OK = nil   -- nil = untested, then true/false
+local function set_note_len(take, hwnd, finer)
   if not take then return end
-  local ok = false
+  local target_qn = 4 / step_dir(denom_of(step_len_qn(take)), finer)
   if hwnd and reaper.MIDIEditor_SetSetting_int and reaper.MIDIEditor_GetSetting_int then
     local before = reaper.MIDIEditor_GetSetting_int(hwnd, "default_note_len")
-    local want   = math.floor(clamp(step_len_qn(take) * mult, 1 / 64, 4) * tpqn_of(take) + 0.5)
-    reaper.MIDIEditor_SetSetting_int(hwnd, "default_note_len", want)
-    ok = reaper.MIDIEditor_GetSetting_int(hwnd, "default_note_len") ~= before
+    reaper.MIDIEditor_SetSetting_int(hwnd, "default_note_len",
+      math.floor(target_qn * tpqn_of(take) + 0.5))
+    NOTELEN_OK = reaper.MIDIEditor_GetSetting_int(hwnd, "default_note_len") ~= before
+  else
+    NOTELEN_OK = false
   end
-  if not ok then set_grid(take, mult) end   -- no working note-length setter -> use the grid
+  if not NOTELEN_OK then set_grid(take, finer) end   -- no note-length setter -> the grid
 end
 
 local function as_frac(qn)
@@ -626,11 +635,12 @@ local function monitor_hint(take)
 end
 
 local HINTS = "0-9 fret   up/down string   left/right grid-step   ctrl+l/r bar   Q chord   R rest   T tie   "
-           .. "[ ] or ctrl+up/down = note len   alt+[ ] or alt+up/down = grid   L let-ring   ctrl+Z/Y undo"
+           .. ", . = grid   - = = note len   L let-ring   ctrl+Z/Y undo    (or use the panel buttons)"
 
 local function draw_panel(take)
   gfx.set(0.13, 0.13, 0.15); gfx.rect(0, 0, gfx.w, PANEL_H)
   gfx.set(0.22, 0.22, 0.25); gfx.line(0, PANEL_H, gfx.w, PANEL_H)
+  local _, hwnd = get_take()
 
   local bw, bh, gp, x0 = 60, 16, 3, 66
   caption(10, 11, "TUNING")
@@ -653,7 +663,23 @@ local function draw_panel(take)
   end
   S.num_frets = stepper(200, 34, 42, "FRETS", S.num_frets, 5, 30)
   S.chan = stepper(360, 34, 56, "MIDI CH", S.chan, 1, 16)
-  S.vel  = stepper(560, 34, 60, "VELOCITY", S.vel, 1, 127)
+  S.vel  = stepper(500, 34, 60, "VEL", S.vel, 1, 127)
+
+  -- GRID and NOTE LENGTH steppers (- shorter / + longer)
+  caption(630, 38, "GRID")
+  if btn(662, 34, 17, 16, "-", false) then set_grid(take, true)  end
+  gfx.set(0.86, 0.86, 0.89); gfx.x = 684; gfx.y = 38
+  gfx.drawstr(take and as_frac(grid_qn(take)) or "-")
+  if btn(724, 34, 17, 16, "+", false) then set_grid(take, false) end
+
+  caption(756, 38, "NOTE")
+  if btn(790, 34, 17, 16, "-", false) then set_note_len(take, hwnd, true)  end
+  gfx.set(0.86, 0.86, 0.89); gfx.x = 812; gfx.y = 38
+  gfx.drawstr(take and as_frac(step_len_qn(take)) or "-")
+  if btn(852, 34, 17, 16, "+", false) then set_note_len(take, hwnd, false) end
+  if NOTELEN_OK == false then
+    gfx.set(0.58, 0.50, 0.40); gfx.x = 884; gfx.y = 38; gfx.drawstr("(=grid)")
+  end
 
   caption(10, 63, "INLAYS")
   if btn(66,  60, 58, bh, "None",     S.inlay == 0) then S.inlay = 0 end
@@ -674,12 +700,8 @@ local function draw_panel(take)
 
   gfx.set(0.44, 0.44, 0.47); gfx.x = 10; gfx.y = 84; gfx.drawstr(HINTS)
   if reaper.time_precise() - last_key_time < 3 then      -- key diagnostic (last press)
-    gfx.set(0.62, 0.58, 0.35); gfx.x = gfx.w - 260; gfx.y = 84
+    gfx.set(0.62, 0.58, 0.35); gfx.x = gfx.w - 180; gfx.y = 84
     gfx.drawstr("key: " .. last_key)
-  end
-  if not reaper.MIDIEditor_SetSetting_int then
-    gfx.set(0.60, 0.50, 0.40); gfx.x = gfx.w - 400; gfx.y = 84
-    gfx.drawstr("(this REAPER: [ ] also = grid)")
   end
 
   gfx.x = 10; gfx.y = PANEL_H - 20
@@ -773,27 +795,24 @@ local function handle_keys(c)
 
   if c ~= 0 then preview_off() end   -- a real non-note key ends any ringing preview
   local ctrl = (mouse.cap & 4) ~= 0
-  local alt  = (mouse.cap & 16) ~= 0
-  if ctrl and alt then ctrl = false end   -- AltGr (US-Intl etc.) = Ctrl+Alt; treat as Alt
+  if ctrl and (mouse.cap & 16) ~= 0 then ctrl = false end   -- AltGr = Ctrl+Alt -> plain Alt
   local take, hwnd = get_take()
   if c == K.BKSP or c == K.DEL then delete_last()
   elseif c == K.RIGHT then if ctrl then step_bar(1)  else step_cursor(1)  end
   elseif c == K.LEFT  then if ctrl then step_bar(-1) else step_cursor(-1) end
   elseif c == K.UP   then
-    if ctrl then set_note_len(take, hwnd, 2)      -- ctrl+up   = longer note
-    elseif alt then set_grid(take, 2)             -- alt+up    = wider grid
+    if ctrl then set_note_len(take, hwnd, false)
     else S.active_string = clamp(S.active_string + 1, 1, S.num_strings) end
   elseif c == K.DOWN then
-    if ctrl then set_note_len(take, hwnd, 0.5)    -- ctrl+down  = shorter note
-    elseif alt then set_grid(take, 0.5)           -- alt+down   = finer grid
+    if ctrl then set_note_len(take, hwnd, true)
     else S.active_string = clamp(S.active_string - 1, 1, S.num_strings) end
-  elseif c == string.byte("r") or c == string.byte("R") then step_cursor(1, "note")   -- rest of the note length
+  elseif c == string.byte("r") or c == string.byte("R") then step_cursor(1, "note")
   elseif c == string.byte("t") or c == string.byte("T") then tie_extend()
   elseif c == string.byte("l") or c == string.byte("L") then S.let_ring = 1 - S.let_ring; ring_prev = {}
-  elseif c == string.byte("[") or c == string.byte("-") or c == string.byte("{") then
-    if alt then set_grid(take, 0.5) else set_note_len(take, hwnd, 0.5) end
-  elseif c == string.byte("]") or c == string.byte("=") or c == string.byte("}") then
-    if alt then set_grid(take, 2) else set_note_len(take, hwnd, 2) end
+  elseif c == string.byte(",") or c == string.byte("<") then set_grid(take, true)      -- grid finer
+  elseif c == string.byte(".") or c == string.byte(">") then set_grid(take, false)     -- grid wider
+  elseif c == string.byte("-") or c == string.byte("_") then set_note_len(take, hwnd, true)   -- shorter note
+  elseif c == string.byte("=") or c == string.byte("+") then set_note_len(take, hwnd, false)  -- longer note
   elseif c == K.CZ then reaper.Main_OnCommand(40029, 0)
   elseif c == K.CY then reaper.Main_OnCommand(40030, 0)
   elseif c == K.SPACE then reaper.Main_OnCommand(40044, 0)
