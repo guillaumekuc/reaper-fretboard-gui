@@ -35,9 +35,9 @@ re-mapped):
 | key | action |
 |---|---|
 | `0`–`9` | fret on the **active string** (type `1` then `2` fast = fret 12) |
-| `↑` / `↓` | choose the active string |
-| `←` / `→` | move the caret one **grid** step |
-| `Ctrl+←` / `Ctrl+→` | jump to the previous / next bar |
+| `↑` / `↓` (or `W` / `S`) | choose the active string |
+| `←` / `→` (or `A` / `D`) | move the caret one **grid** step |
+| `Ctrl+←` / `Ctrl+→` (or `Ctrl+A` / `Ctrl+D`) | jump to the previous / next bar |
 | `Q` | chord mode (Dorico-style): notes stack at the cursor; `Q` again commits and moves on |
 | `R` | rest — advance one **note length** |
 | `T` | tie: lengthen the last note by one note length and advance |
@@ -53,8 +53,9 @@ re-mapped):
   change them in place (visible in the editor, shared with keyboard step
   input). Grid = how far the caret moves; note length = how long inserted
   notes are. For dotted/triplet use the editor's own grid menu.
-- **Grey notes** (what's already in the take) show for the current **beat** or
-  the whole **bar** — toggle in the panel.
+- **Grey notes** (what's already in the take) show for the current **beat**,
+  the beat plus the next one, or the whole **bar** — pick with **SHOW** in the
+  strip.
 - Every inserted / removed / tied note is its **own undo point** (`Ctrl+Z`
   peels them one at a time), same as editing in the piano roll.
 - The panel shows a **keycode diagnostic** (top-right) when a key doesn't seem
@@ -72,16 +73,26 @@ Copy `Fretboard.jsfx` into `%APPDATA%\REAPER\Effects\`, add FX → JS →
 unchanged and is mirrored on the board; clicking sends live MIDI (record the
 track's MIDI output to capture it).
 
-## Settings panel (both versions)
+## Top strip & settings panel (ReaScript)
 
-Click **settings** (top-right) to open the control panel; **hide** to collapse
-to just the fretboard. Settings persist (FX state for JSFX, `ExtState` for the
-script).
+A permanent top **strip** always shows the controls you reach for while
+entering: the **Chord** toggle, the **SHOW** grey-notes selector (**Beat** /
+**Beat+** the next beat / whole **Bar**), the **MIDI channel**, and a **LEN**
+row of note-icon buttons (1/32 → whole, fastest first) that jump the
+MIDI-editor note length straight to that value. A `CHORD` badge sits over the
+board whenever chord mode is on.
 
-Panel controls: tuning preset, string count (3–9), fret count (5–30, default
-22), inlays (none / standard / capsule), note-name display, MIDI channel,
-velocity. (Note length / step length is the MIDI editor's own setting, not a
-control here.)
+Click **settings** (top-right) to open the control panel below the strip;
+**hide** to collapse it. The panel holds everything else — tuning preset,
+string count (3–9), fret count (5–30, default 22), velocity, **GRID / NOTE**
+steppers, inlays (none / standard / capsule), note-name display, **SPELL**
+(sharps `C#` or flats `Db` — applies to every note name shown), let-ring —
+and never duplicates the strip's controls. Settings persist (`ExtState`).
+
+Fret numbers at the traditional fretmarker positions (3, 5, 7, 9, 12, 15, …)
+are **bold** and carry a small dot above them (two at the octave).
+
+(The JSFX version keeps its single in-canvas panel; see `ARCHITECTURE.md`.)
 
 **Tuning** is per-string. Drag a string's open-note label up or down to
 retune it. Presets just fill the fields: "Standard" sets 6-string EADGBE and

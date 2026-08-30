@@ -52,7 +52,7 @@ function loop()
 
   update_mouse()             -- edge detection: mouse.down / .up / .held
   consumed = false           -- click-routing flag for this frame
-  handle_keys(c)             -- digits, arrows(+ctrl=bar), Q chord, R/T/L, [ ]=note (alt=grid)
+  handle_keys(c)             -- digits, arrows / WASD (+ctrl=bar), Q chord, R/T/L, [ ]=note (alt=grid)
   poll_live_input()          -- fold hardware MIDI into live_notes
 
   take = get_take()          -- the MIDI editor's active take, or nil
@@ -60,7 +60,7 @@ function loop()
   sync_cursor_from_edit(take) -- follow the user moving the edit cursor
 
   scan_context(take)         -- every 6th frame (or every frame while playing)
-  layout() ; draw_board() ; draw_panel()/draw_header() ; draw_toggle()
+  layout() ; draw_board() ; draw_panel() if open ; draw_strip() ; draw_toggle()
   handle_string_drag()       -- retune by dragging open-note labels
   handle_board_click()       -- the main event: preview + insert
 
@@ -83,6 +83,11 @@ is the lowest string; `pitch_at(s, f) = S.str_note[s] + f`.
 - `apply_preset(idx)` fills `S.str_note` from `TUNINGS[idx+1]`. Rule presets
   build from `S.str_note[1]` as the root; the **ROOT** buttons (E2 = 40,
   C2 = 36) and dragging string 1 both just set that and re-apply.
+- `note_name(n)` indexes `NAME_SHARP` or `NAME_FLAT` by `S.accidental`
+  (0 / 1, the panel's **SPELL** `C#` / `Db` buttons). `S` is forward-declared
+  so `note_name`, defined above the table, closes over it. Every displayed
+  name (open strings, board overlays, undo labels, status line) goes through
+  this one function.
 - `S` is loaded from / saved to `ExtState` section `GK_FretboardController`
   (a fixed key list; `str_note` comma-joined). `save_state` keeps integers
   integer and rounds fractions to 6 dp. `active_string` is *not* persisted.
@@ -127,6 +132,7 @@ They're changed **in place** in REAPER:
 |---|---|---|
 | `[` `]` (also `-` `=` `{` `}`) or **Ctrl+↑/↓** | `set_note_len(take, hwnd, ×2/0.5)` | `MIDIEditor_SetSetting_int(hwnd, "default_note_len", qn·tpqn)` |
 | `Alt+[` `Alt+]` or **Alt+↑/↓** | `set_grid(take, ×0.5/2)` | `SetMIDIEditorGrid(0, qn)` |
+| panel **LEN** icon buttons (whole … 1/32) | `set_note_len_to(take, hwnd, wn)` | nearest `notelen_actions` "Set length…" command, else `SetMIDIEditorGrid` |
 
 The **arrow variants** exist because `[`/`]` don't survive every keyboard
 layout. Also: on US-International / AZERTY the **right Alt is AltGr = LCtrl +
@@ -216,10 +222,11 @@ note or mouse-release.
   3. **playback** notes straddling the play cursor → bright.
   4. **take notes in the context window** (`scan_context`) → dim grey. The
      window is `context_window(take)`: `S.ctx_mode` 0 = the current **beat**
-     (`floor(beats)`…`+1` via `TimeMap2_timeToBeats`/`beatsToTime`), 1 = the
-     whole **bar** (`meas`…`meas+1`). A note counts if it overlaps
-     `[lo_ppq, hi_ppq)`. The `Grey: Beat / Bar` panel buttons set it. (v0.4
-     drew *every* note in the take — that read as noise / fake inlays.)
+     (`floor(beats)`…`+1` via `TimeMap2_timeToBeats`/`beatsToTime`), 1 =
+     **beat + next beat** (`…+2`), 2 = the whole **bar** (`meas`…`meas+1`). A
+     note counts if it overlaps `[lo_ppq, hi_ppq)`. The strip's
+     `SHOW: Beat / Beat+ / Bar` buttons set it. (v0.4 drew *every* note in the
+     take — that read as noise / fake inlays.)
   `scan_context` is throttled to every 6th frame unless playing.
 
 ### Let ring (`L`)
@@ -238,8 +245,12 @@ existing tails stay. `ring_prev` is cleared on every toggle.
 ## 6. Coordinate system & widgets
 
 Identical approach to the JSFX version: `layout()` recomputes `L/R/T/B`,
-`fret_sp`, `str_sp`, `nr`, `ir` each frame; `header_h` is `PANEL_H` (open) or
-`26` (collapsed) and `T = header_h + 24` keeps the fret-number row clear.
+`fret_sp`, `str_sp`, `nr`, `ir` each frame. The top area is a permanent
+`HDR_H` (30 px) **strip** — `draw_strip`, always drawn, holds Chord / SHOW /
+MIDI-channel / the LEN quick-length icons — plus, when `panel_open`, a
+`PANEL_H` panel below it (`draw_panel`, everything else, no duplicates). So
+`header_h = HDR_H + (panel_open and PANEL_H or 0)` and `T = header_h + 32`
+keeps the fret-number row (and its fretmarker dots) clear.
 `str_y` / `fret_x` / `note_x` are the same helpers.
 
 Widgets are immediate-mode Lua functions — no `#lbl` global hack needed, they
@@ -272,7 +283,11 @@ mismatch used to shift the right edge inward).
   that matter (digits, arrows, Ctrl+arrows, `Q R T L [ ] - =`, Backspace,
   Ctrl+Z/Y, Space) against that take. Arrow keycodes are the ASCII-of-the-name
   magic constants in `K` (`LEFT = 1818584692` = `"left"`, `UP = 30064` =
-  `"up"`, …), not plain codes. Ctrl for the Ctrl+arrow bar jumps comes from
+  `"up"`, …), not plain codes. `W/A/S/D` are remapped to the arrow constants at
+  the top of `handle_keys` (a left-hand cluster for one-handed use with the
+  mouse), so `Ctrl+A` / `Ctrl+D` still do the bar jump. On AZERTY the physical
+  A/Q keys are swapped, so that pair inherits the same layout quirk as the
+  digit row — the arrows always work regardless. Ctrl for the Ctrl+arrow bar jumps comes from
   `mouse.cap & 4`, since `gfx.getchar` gives the same code for `←` and
   `Ctrl+←`.
 - **Keyboard layout** – digit and symbol keys come through as whatever

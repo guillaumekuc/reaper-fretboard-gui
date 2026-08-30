@@ -1,6 +1,6 @@
 --[[
   Fretboard MIDI Controller  (ReaScript / Lua)
-  version 0.9.9-dbg
+  version 0.9.10-dbg
 
   A guitar-fretboard window that inserts notes into the take open in the active
   MIDI editor, Guitar-Pro-style: pick a string, type a fret, it writes the note
@@ -12,9 +12,9 @@
 
   Keys (the window steals focus from the MIDI editor, so these are re-mapped):
     0-9            fret on the active string  (type 1 then 2 quickly = 12)
-    up / down      choose the active string
-    left / right   move the caret by one GRID step
-    ctrl+left/right jump to the previous / next bar
+    up / down  (W / S)      choose the active string
+    left / right  (A / D)   move the caret by one GRID step
+    ctrl+left/right  (ctrl+A / ctrl+D)  jump to the previous / next bar
     Q              chord mode (Dorico-style): notes stack at the cursor without
                    advancing; press Q again to commit the chord and move on
     R              rest: advance by one NOTE LENGTH, insert nothing
@@ -46,7 +46,8 @@ local MIDI_SECTION  = 32060   -- MIDI editor action section
 
 -- ============================================================= model =====
 
-local NAMES = { "C","C#","D","D#","E","F","F#","G","G#","A","A#","B" }
+local NAME_SHARP = { "C","C#","D","D#","E","F","F#","G","G#","A","A#","B" }
+local NAME_FLAT  = { "C","Db","D","Eb","E","F","Gb","G","Ab","A","Bb","B" }
 
 local TUNINGS = {
   { name = "Custom",   rule = nil   },
@@ -58,13 +59,17 @@ local TUNINGS = {
   { name = "Tritone",  rule = 6     },
 }
 
+local S   -- state; assigned below. note_name() reads S.accidental at call time.
+
 local function clamp(v, lo, hi) return v < lo and lo or (v > hi and hi or v) end
-local function note_name(n) return NAMES[(n % 12) + 1] end
+local function note_name(n)
+  return (S.accidental == 1 and NAME_FLAT or NAME_SHARP)[(n % 12) + 1]
+end
 local function octave(n) return math.floor(n / 12) - 1 end
 
 -- ============================================================= state =====
 
-local S = {
+S = {
   num_strings   = 6,
   num_frets     = 22,
   tuning        = 1,
@@ -76,7 +81,8 @@ local S = {
   str_note      = { 40, 45, 50, 55, 59, 64, 35, 30, 25 },
   active_string = 3,      -- not persisted
   let_ring      = 0,
-  ctx_mode      = 0,      -- grey context notes: 0 = current beat, 1 = whole bar
+  ctx_mode      = 0,      -- grey context notes: 0 = beat, 1 = beat + next beat, 2 = whole bar
+  accidental    = 0,      -- note spelling: 0 = sharps, 1 = flats
 }
 
 local function pitch_at(s, f) return S.str_note[s] + f end   -- s: 1 = lowest string
@@ -104,7 +110,7 @@ local function save_state()
     reaper.SetExtState(SECT, k, tostring(v), true)
   end
   for _, k in ipairs({ "num_strings","num_frets","tuning","inlay","name_mode",
-                       "chan","vel","panel_open","let_ring","ctx_mode" }) do
+                       "chan","vel","panel_open","let_ring","ctx_mode","accidental" }) do
     set(k, S[k])
   end
   set("str_note", table.concat(S.str_note, ","))
@@ -116,7 +122,7 @@ local function load_state()
     return v ~= "" and tonumber(v) or d
   end
   for _, k in ipairs({ "num_strings","num_frets","tuning","inlay","name_mode",
-                       "chan","vel","panel_open","let_ring","ctx_mode" }) do
+                       "chan","vel","panel_open","let_ring","ctx_mode","accidental" }) do
     S[k] = num(k, S[k])
   end
   local sn = reaper.GetExtState(SECT, "str_note")
@@ -128,6 +134,8 @@ local function load_state()
   for i = 1, MAX_STRINGS do S.str_note[i] = S.str_note[i] or (25 + i * 3) end
   S.num_strings = clamp(math.floor(S.num_strings), 3, MAX_STRINGS)
   S.num_frets   = clamp(math.floor(S.num_frets), 5, 30)
+  S.ctx_mode    = clamp(math.floor(S.ctx_mode), 0, 2)
+  S.accidental  = clamp(math.floor(S.accidental), 0, 1)
   S.active_string = clamp(math.floor(S.num_strings / 2) + 1, 1, S.num_strings)
 end
 
@@ -243,6 +251,27 @@ local function set_note_len(take, hwnd, finer)
   if not take then return end
   NOTELEN_OK = step_actions(notelen_actions, hwnd, step_len_qn(take) / 4, finer, "notelen")
   if not NOTELEN_OK then set_grid(take, hwnd, finer) end
+end
+
+-- jump note length straight to a value (whole-note fraction: 1/4 note -> 0.25),
+-- for the quick-length buttons. Uses the discovered "Set length..." actions;
+-- without SWS it falls back to setting the grid, same as set_note_len.
+local function set_note_len_to(take, hwnd, wn)
+  if not take then return end
+  if #notelen_actions > 0 and hwnd then
+    local idx, bd = 1, 1e9
+    for i, a in ipairs(notelen_actions) do
+      local d = math.abs(a.v - wn)
+      if d < bd then bd, idx = d, i end
+    end
+    reaper.MIDIEditor_OnCommand(hwnd, notelen_actions[idx].cmd)
+    NOTELEN_OK = true
+    DBG = string.format("notelen -> 1/%g (cmd %d)", 1 / notelen_actions[idx].v, notelen_actions[idx].cmd)
+  elseif reaper.SetMIDIEditorGrid then
+    reaper.SetMIDIEditorGrid(0, clamp(wn * 4, 1 / 32, 16))
+    NOTELEN_OK = false
+    DBG = "notelen: no SWS actions - set grid instead"
+  end
 end
 
 local function as_frac(qn)
@@ -438,12 +467,13 @@ local function context_window(take)
   local t = reaper.TimeMap2_QNToTime(0, cursor_qn)
   local beats, meas = reaper.TimeMap2_timeToBeats(0, t)
   local lo_t, hi_t
-  if S.ctx_mode == 1 then                                   -- Bar
+  if S.ctx_mode == 2 then                                   -- whole Bar
     lo_t = reaper.TimeMap2_beatsToTime(0, 0, meas)
     hi_t = reaper.TimeMap2_beatsToTime(0, 0, meas + 1)
-  else                                                       -- Beat
-    lo_t = reaper.TimeMap2_beatsToTime(0, math.floor(beats), meas)
-    hi_t = reaper.TimeMap2_beatsToTime(0, math.floor(beats) + 1, meas)
+  else                                                       -- Beat, or Beat + next beat
+    local b = math.floor(beats)
+    lo_t = reaper.TimeMap2_beatsToTime(0, b, meas)
+    hi_t = reaper.TimeMap2_beatsToTime(0, b + (S.ctx_mode == 1 and 2 or 1), meas)
   end
   return reaper.MIDI_GetPPQPosFromProjQN(take, reaper.TimeMap2_timeToQN(0, lo_t)),
          reaper.MIDI_GetPPQPosFromProjQN(take, reaper.TimeMap2_timeToQN(0, hi_t))
@@ -549,10 +579,38 @@ local function stepper(x, y, caplen, label, val, lo, hi)
   return nv
 end
 
+-- a musical-note glyph for the quick note-length buttons; den = 1,2,4,8,16,32
+-- (whole -> hollow head, half -> hollow + stem, quarter+ -> filled, eighth+ -> flags)
+local function note_icon(cx, cy, den)
+  local filled = den >= 4
+  local r = 3
+  gfx.circle(cx - 1, cy + 3, r, filled and 1 or 0, 1)
+  gfx.circle(cx + 1, cy + 3, r, filled and 1 or 0, 1)
+  if den >= 2 then
+    gfx.line(cx + r + 1, cy + 3, cx + r + 1, cy - 6)                 -- stem
+    local flags = (den == 8) and 1 or (den == 16) and 2 or (den == 32) and 3 or 0
+    for i = 0, flags - 1 do
+      local fy = cy - 6 + i * 3
+      gfx.line(cx + r + 1, fy, cx + r + 5, fy + 4)                   -- flag
+    end
+  end
+end
+
+-- quick note-length button: sets the MIDI editor note length to 1/den,
+-- lit when that is the current length. cur_wn = current length / whole note.
+local function len_btn(x, y, den, cur_wn)
+  local active = math.abs((1 / den) - cur_wn) < 1e-4
+  local clicked = btn(x, y, 24, 16, "", active)
+  gfx.set(active and 0.96 or 0.74, active and 0.96 or 0.74, active and 0.98 or 0.77)
+  note_icon(x + 9, y + 8, den)
+  return clicked
+end
+
 -- ============================================================ drawing ====
 
 local L, R, T, B, boardw, boardh, fret_sp, str_sp, nr, ir, header_h
 local PANEL_H = 146
+local HDR_H   = 30          -- always-visible top strip (title + quick controls)
 local drag_s, drag_y0, drag_n0 = -1, 0, 0
 
 local function str_y(s)  return gfx.h - B - (s - 1) * str_sp end
@@ -560,8 +618,8 @@ local function fret_x(f) return L + f * fret_sp end
 local function note_x(f) if f <= 0 then return L - 20 end return L + (f - 0.5) * fret_sp end
 
 local function layout()
-  header_h = (S.panel_open == 1) and PANEL_H or 26
-  L, R, T, B = 54, 16, header_h + 24, 18
+  header_h = HDR_H + ((S.panel_open == 1) and PANEL_H or 0)
+  L, R, T, B = 54, 16, header_h + 32, 18
   boardw  = gfx.w - L - R
   boardh  = gfx.h - T - B
   fret_sp = boardw / S.num_frets
@@ -624,10 +682,25 @@ local function draw_board(at_cursor, playing)
     gfx.line(x, T, x, gfx.h - B)
     if f == 0 then gfx.line(x + 1, T, x + 1, gfx.h - B) end
     if f > 0 then
-      gfx.set(0.45, 0.45, 0.47); gfx.x = note_x(f) - 6; gfx.y = T - 16
-      gfx.drawstr(tostring(f))
+      local m = f % 12
+      local marker = m == 3 or m == 5 or m == 7 or m == 9 or m == 0
+      local dx  = math.floor(note_x(f) + 0.5)
+      local lbl = tostring(f)
+      gfx.setfont(marker and 2 or 1)                 -- bold at a fretmarker
+      local tw = gfx.measurestr(lbl)
+      if marker then
+        gfx.set(0.74, 0.74, 0.77)                    -- fretmarker dot(s), centred on the number
+        if m == 0 then gfx.circle(dx - 3, T - 25, 1.5, 1, 1); gfx.circle(dx + 3, T - 25, 1.5, 1, 1)
+        else gfx.circle(dx, T - 25, 1.5, 1, 1) end
+        gfx.set(0.66, 0.66, 0.69)
+      else
+        gfx.set(0.45, 0.45, 0.47)
+      end
+      gfx.x = dx - math.floor(tw / 2 + 0.5); gfx.y = T - 16
+      gfx.drawstr(lbl)
     end
   end
+  gfx.setfont(1)
 
   for s = 1, S.num_strings do
     local y = str_y(s)
@@ -667,6 +740,14 @@ local function draw_board(at_cursor, playing)
       end
     end
   end
+
+  if chord_mode then                          -- always-visible chord-mode badge
+    local w = 58
+    local bx, by = math.floor((gfx.w - w) / 2), T + 3
+    gfx.set(0.86, 0.55, 0.22); gfx.rect(bx, by, w, 15)
+    gfx.set(0.40, 0.22, 0.06); box(bx, by, w, 15)
+    gfx.set(0.10, 0.10, 0.11); gfx.x = bx + 9; gfx.y = by + 3; gfx.drawstr("CHORD")
+  end
 end
 
 local function monitor_hint(take)
@@ -678,82 +759,80 @@ local function monitor_hint(take)
   return "   (arm + monitor the track to hear previews)"
 end
 
-local HINTS = "0-9 fret   up/down string   left/right grid-step   ctrl+l/r bar   Q chord   R rest   T tie   "
-           .. "[ ] note len   shift+[ ] grid   L let-ring   ctrl+Z/Y undo    (or the panel GRID / NOTE buttons)"
+local HINTS = "0-9 fret   up/down (W/S) string   left/right (A/D) grid-step   ctrl+A/D bar   Q chord   R rest   T tie   "
+           .. "[ ] note len   shift+[ ] grid   L let-ring   ctrl+Z/Y undo    (or the strip LEN + panel GRID / NOTE buttons)"
 
 local function draw_panel(take)
-  gfx.set(0.13, 0.13, 0.15); gfx.rect(0, 0, gfx.w, PANEL_H)
-  gfx.set(0.22, 0.22, 0.25); gfx.line(0, PANEL_H, gfx.w, PANEL_H)
+  local py = HDR_H                              -- panel sits below the permanent strip
+  gfx.set(0.13, 0.13, 0.15); gfx.rect(0, py, gfx.w, PANEL_H)
+  gfx.set(0.22, 0.22, 0.25); gfx.line(0, py + PANEL_H, gfx.w, py + PANEL_H)
   local _, hwnd = get_take()
 
   local bw, bh, gp, x0 = 60, 16, 3, 66
-  caption(10, 11, "TUNING")
+  caption(10, py + 11, "TUNING")
   for i = 0, #TUNINGS - 1 do
-    if btn(x0 + i * (bw + gp), 8, bw, bh, TUNINGS[i + 1].name, S.tuning == i) then
+    if btn(x0 + i * (bw + gp), py + 8, bw, bh, TUNINGS[i + 1].name, S.tuning == i) then
       S.tuning = i; apply_preset(i)
     end
   end
   if S.tuning >= 2 then
     local rx = x0 + #TUNINGS * (bw + gp) + 12
-    caption(rx, 11, "ROOT")
-    if btn(rx + 38, 8, 38, bh, "E2", S.str_note[1] == 40) then S.str_note[1] = 40; apply_preset(S.tuning) end
-    if btn(rx + 79, 8, 38, bh, "C2", S.str_note[1] == 36) then S.str_note[1] = 36; apply_preset(S.tuning) end
+    caption(rx, py + 11, "ROOT")
+    if btn(rx + 38, py + 8, 38, bh, "E2", S.str_note[1] == 40) then S.str_note[1] = 40; apply_preset(S.tuning) end
+    if btn(rx + 79, py + 8, 38, bh, "C2", S.str_note[1] == 36) then S.str_note[1] = 36; apply_preset(S.tuning) end
   end
 
-  local ns = stepper(10, 34, 56, "STRINGS", S.num_strings, 3, MAX_STRINGS)
+  local ns = stepper(10, py + 34, 56, "STRINGS", S.num_strings, 3, MAX_STRINGS)
   if ns ~= S.num_strings then
     S.num_strings = ns
     if S.tuning >= 1 then apply_preset(S.tuning) end
   end
-  S.num_frets = stepper(200, 34, 42, "FRETS", S.num_frets, 5, 30)
-  S.chan = stepper(360, 34, 56, "MIDI CH", S.chan, 1, 16)
-  S.vel  = stepper(500, 34, 60, "VEL", S.vel, 1, 127)
+  S.num_frets = stepper(200, py + 34, 42, "FRETS", S.num_frets, 5, 30)
+  S.vel  = stepper(360, py + 34, 60, "VEL", S.vel, 1, 127)
 
-  -- GRID and NOTE LENGTH steppers (- shorter / + longer)
-  caption(630, 38, "GRID")
-  if btn(662, 34, 17, 16, "-", false) then set_grid(take, hwnd, true)  end
-  gfx.set(0.86, 0.86, 0.89); gfx.x = 684; gfx.y = 38
+  -- GRID and NOTE LENGTH steppers (- shorter / + longer); quick sizes live in the strip
+  caption(500, py + 38, "GRID")
+  if btn(532, py + 34, 17, 16, "-", false) then set_grid(take, hwnd, true)  end
+  gfx.set(0.86, 0.86, 0.89); gfx.x = 554; gfx.y = py + 38
   gfx.drawstr(take and as_frac(grid_qn(take)) or "-")
-  if btn(724, 34, 17, 16, "+", false) then set_grid(take, hwnd, false) end
+  if btn(594, py + 34, 17, 16, "+", false) then set_grid(take, hwnd, false) end
 
-  caption(756, 38, "NOTE")
-  if btn(790, 34, 17, 16, "-", false) then set_note_len(take, hwnd, true)  end
-  gfx.set(0.86, 0.86, 0.89); gfx.x = 812; gfx.y = 38
+  caption(626, py + 38, "NOTE")
+  if btn(660, py + 34, 17, 16, "-", false) then set_note_len(take, hwnd, true)  end
+  gfx.set(0.86, 0.86, 0.89); gfx.x = 682; gfx.y = py + 38
   gfx.drawstr(take and as_frac(step_len_qn(take)) or "-")
-  if btn(852, 34, 17, 16, "+", false) then set_note_len(take, hwnd, false) end
+  if btn(722, py + 34, 17, 16, "+", false) then set_note_len(take, hwnd, false) end
   if NOTELEN_OK == false then
-    gfx.set(0.58, 0.50, 0.40); gfx.x = 884; gfx.y = 38; gfx.drawstr("(NL not settable - using grid)")
+    gfx.set(0.58, 0.50, 0.40); gfx.x = 754; gfx.y = py + 38; gfx.drawstr("(NL not settable - using grid)")
   end
 
-  caption(10, 63, "INLAYS")
-  if btn(66,  60, 58, bh, "None",     S.inlay == 0) then S.inlay = 0 end
-  if btn(127, 60, 58, bh, "Standard", S.inlay == 1) then S.inlay = 1 end
-  if btn(188, 60, 58, bh, "Capsule",  S.inlay == 2) then S.inlay = 2 end
-  caption(280, 63, "NAMES")
-  if btn(330, 60, 46, bh, "Off",    S.name_mode == 0) then S.name_mode = 0 end
-  if btn(379, 60, 52, bh, "Played", S.name_mode == 1) then S.name_mode = 1 end
-  if btn(434, 60, 42, bh, "All",    S.name_mode == 2) then S.name_mode = 2 end
-  if btn(500, 60, 74, bh, "Let ring", S.let_ring == 1) then S.let_ring = 1 - S.let_ring; ring_prev = {} end
-  if btn(580, 60, 62, bh, "Chord", chord_mode) then
-    if chord_mode and chord_dirty then step_cursor(1) end
-    chord_mode = not chord_mode; chord_dirty = false; preview_off()
-  end
-  caption(652, 63, "GREY")
-  if btn(688, 60, 46, bh, "Beat", S.ctx_mode == 0) then S.ctx_mode = 0 end
-  if btn(737, 60, 42, bh, "Bar",  S.ctx_mode == 1) then S.ctx_mode = 1 end
+  caption(10, py + 63, "INLAYS")
+  if btn(66,  py + 60, 58, bh, "None",     S.inlay == 0) then S.inlay = 0 end
+  if btn(127, py + 60, 58, bh, "Standard", S.inlay == 1) then S.inlay = 1 end
+  if btn(188, py + 60, 58, bh, "Capsule",  S.inlay == 2) then S.inlay = 2 end
+  caption(280, py + 63, "NAMES")
+  if btn(330, py + 60, 46, bh, "Off",    S.name_mode == 0) then S.name_mode = 0 end
+  if btn(379, py + 60, 52, bh, "Played", S.name_mode == 1) then S.name_mode = 1 end
+  if btn(434, py + 60, 42, bh, "All",    S.name_mode == 2) then S.name_mode = 2 end
 
-  gfx.set(0.44, 0.44, 0.47); gfx.x = 10; gfx.y = 82; gfx.drawstr(HINTS)
+  caption(490, py + 63, "SPELL")                     -- sharps or flats, everywhere
+  if btn(534, py + 60, 34, bh, "C#", S.accidental == 0) then S.accidental = 0 end
+  if btn(571, py + 60, 34, bh, "Db", S.accidental == 1) then S.accidental = 1 end
+
+  if btn(628, py + 60, 74, bh, "Let ring", S.let_ring == 1) then S.let_ring = 1 - S.let_ring; ring_prev = {} end
+
+  gfx.set(0.44, 0.44, 0.47); gfx.x = 10; gfx.y = py + 82; gfx.drawstr(HINTS)
   if reaper.time_precise() - last_key_time < 3 then      -- key diagnostic (last press)
-    gfx.set(0.62, 0.58, 0.35); gfx.x = gfx.w - 180; gfx.y = 82
+    gfx.set(0.62, 0.58, 0.35); gfx.x = gfx.w - 180; gfx.y = py + 82
     gfx.drawstr("key: " .. last_key)
   end
-  gfx.set(0.50, 0.50, 0.42); gfx.x = 10; gfx.y = 100      -- grid / note-length diagnostic
+  gfx.set(0.50, 0.50, 0.42); gfx.x = 10; gfx.y = py + 100  -- grid / note-length diagnostic
   gfx.drawstr(string.format("dbg: gridQN=%.3f noteQN=%.3f  actions g=%d n=%d  %s",
     take and grid_qn(take) or 0,
     take and (select(3, reaper.MIDI_GetGrid(take)) or 0) or 0,
     #grid_actions, #notelen_actions, DBG))
 
-  gfx.x = 10; gfx.y = PANEL_H - 20
+  gfx.x = 10; gfx.y = py + PANEL_H - 20
   if take then
     gfx.set(0.55, 0.62, 0.55)
     local _, nm = reaper.GetSetMediaItemTakeInfo_String(take, "P_NAME", "", false)
@@ -772,11 +851,45 @@ local function draw_panel(take)
   end
 end
 
-local function draw_header(take)
-  gfx.set(0.40, 0.40, 0.43); gfx.x = 8; gfx.y = 6
-  gfx.drawstr(take and "Fretboard - type 0-9 for frets, up/down picks string, arrows step  (open settings for all keys)"
-                    or "Fretboard - open a MIDI item in the MIDI editor to insert notes")
-  gfx.set(0.22, 0.22, 0.25); gfx.line(0, header_h, gfx.w, header_h)
+-- the permanent top strip: always drawn, never hidden by the settings panel,
+-- and never duplicated inside it
+local function draw_strip(take)
+  local _, hwnd = get_take()
+  gfx.set(0.12, 0.12, 0.14); gfx.rect(0, 0, gfx.w, HDR_H)
+
+  gfx.set(0.42, 0.42, 0.45); gfx.x = 8; gfx.y = 9
+  gfx.drawstr("Fretboard")
+
+  local x = 78
+  if btn(x, 5, 50, 18, "Chord", chord_mode) then
+    if chord_mode and chord_dirty then step_cursor(1) end
+    chord_mode = not chord_mode; chord_dirty = false; preview_off()
+  end
+  x = x + 58
+
+  caption(x, 9, "SHOW"); x = x + 34
+  if btn(x, 5, 36, 18, "Beat",  S.ctx_mode == 0) then S.ctx_mode = 0 end
+  x = x + 38
+  if btn(x, 5, 42, 18, "Beat+", S.ctx_mode == 1) then S.ctx_mode = 1 end   -- beat + next beat
+  x = x + 44
+  if btn(x, 5, 32, 18, "Bar",   S.ctx_mode == 2) then S.ctx_mode = 2 end
+  x = x + 40
+
+  S.chan = stepper(x, 6, 20, "CH", S.chan, 1, 16)
+  x = x + 95
+
+  caption(x, 9, "LEN"); x = x + 26                 -- quick note length: fastest -> slowest
+  local cur_wn = take and (step_len_qn(take) / 4) or -1
+  for _, den in ipairs({ 32, 16, 8, 4, 2, 1 }) do
+    if len_btn(x, 6, den, cur_wn) then set_note_len_to(take, hwnd, 1 / den) end
+    x = x + 26
+  end
+
+  if not take then
+    gfx.set(0.60, 0.50, 0.45); gfx.x = x + 12; gfx.y = 9
+    gfx.drawstr("- no MIDI editor")
+  end
+  gfx.set(0.22, 0.22, 0.25); gfx.line(0, HDR_H, gfx.w, HDR_H)
 end
 
 local function draw_toggle()
@@ -833,6 +946,15 @@ local K = { LEFT = 1818584692, RIGHT = 1919379572, UP = 30064, DOWN = 1685026670
 local function handle_keys(c)
   if c >= 48 and c <= 57 then type_fret(c - 48); return end
   if c ~= 0 then digit_pending = nil end   -- clear on a real non-digit key, NOT every idle frame
+
+  -- left-hand cluster (mouse in the right hand): W/A/S/D double the arrows.
+  -- Remapped before everything else, so Ctrl+A / Ctrl+D still jump by the bar.
+  -- No conflict with the letter commands (Q chord, R rest, T tie, L let-ring).
+  if     c == string.byte("a") or c == string.byte("A") then c = K.LEFT
+  elseif c == string.byte("d") or c == string.byte("D") then c = K.RIGHT
+  elseif c == string.byte("w") or c == string.byte("W") then c = K.UP
+  elseif c == string.byte("s") or c == string.byte("S") then c = K.DOWN
+  end
 
   if c == string.byte("q") or c == string.byte("Q") then      -- Dorico-style chord mode
     if chord_mode and chord_dirty then step_cursor(1) end     -- commit the chord, move on
@@ -908,7 +1030,8 @@ local function loop()
 
   layout()
   draw_board(CTX_at_cursor, CTX_playing)
-  if S.panel_open == 1 then draw_panel(take) else draw_header(take) end
+  if S.panel_open == 1 then draw_panel(take) end
+  draw_strip(take)
   draw_toggle()
   handle_string_drag()
   handle_board_click()
@@ -941,6 +1064,7 @@ if wnd ~= "" then
 end
 
 gfx.init("Fretboard MIDI Controller", w, h, d, x, y)
-gfx.setfont(1, "Arial", 14)
+gfx.setfont(2, "Arial", 14, string.byte("b"))   -- bold: the fretmarker fret numbers
+gfx.setfont(1, "Arial", 14)                      -- regular (current)
 reaper.atexit(on_exit)
 loop()
