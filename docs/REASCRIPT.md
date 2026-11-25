@@ -204,13 +204,16 @@ note or mouse-release.
 
 ## 5. Preview & visualisation
 
-- **Preview**: on board press, `StuffMIDIMessage(0, 0x90|chan, pitch, vel)`
-  (mode 0 = virtual-keyboard queue). It plays through whatever track the VKB
-  targets, so when the editor's take changes the script does
-  `SetOnlyTrackSelected` on that take's track. You still need the track
-  **armed + input-monitoring** to hear it — same as keyboard step input — and
-  the status line says so when it isn't. Note-off on release and whenever the
-  mouse isn't held. Preview works with no MIDI editor open.
+- **Preview**: with SWS, `preview_on` plays a cached one-note MIDI file
+  (`preview_source`: `<resource>/Data/FretboardController/pv_<ch>_<pitch>_<vel>.mid`,
+  2 QN long) through `CF_CreatePreview` + `CF_Preview_SetOutputTrack(take's
+  track)`. That feeds the track's FX chain directly, so it sounds **without**
+  arming, monitoring or VKB routing. `preview_off` calls `CF_Preview_Stop`.
+  Without SWS, or with no MIDI editor open, it falls back to
+  `StuffMIDIMessage(0, 0x90|chan, pitch, vel)` (mode 0 = virtual-keyboard
+  queue), which needs the VKB-targeted track **armed + input-monitoring** with
+  a record input that accepts the VKB; the status line says so. Note-off on
+  release and whenever the mouse isn't held.
 - **Visualisation** — the board lights, brightest first:
   1. **mouse preview** pitch → white.
   2. **live hardware MIDI** (`live_notes`) → bright. `poll_live_input()` reads

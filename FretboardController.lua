@@ -295,18 +295,78 @@ local function find_note(take, sppq, pitch, chan)
   end
 end
 
-local function preview_off()
-  for p in pairs(preview_notes) do
-    reaper.StuffMIDIMessage(0, 0x80 + (S.chan - 1), p, 0)
+-- Preview path 1 (SWS): play a one-note MIDI file straight into the take's
+-- track FX with CF_Preview - no arming / monitoring / VKB routing needed.
+-- The files are cached per (chan, pitch, vel) under <resource>/Data.
+-- Path 2 (fallback): the Virtual MIDI Keyboard, which only sounds when the
+-- track is armed + monitoring with a record input that accepts the VKB.
+local HAS_CF_PREVIEW = reaper.CF_CreatePreview ~= nil and reaper.PCM_Source_CreateFromFile ~= nil
+local preview_dir, preview_src = nil, {}   -- key -> PCM_source
+
+local function vlq(n)
+  local b = { n & 0x7F }
+  n = n >> 7
+  while n > 0 do table.insert(b, 1, (n & 0x7F) | 0x80); n = n >> 7 end
+  return string.char(table.unpack(b))
+end
+
+local function preview_source(ch, p, v)
+  local key = string.format("%d_%d_%d", ch, p, v)
+  if preview_src[key] then return preview_src[key] end
+  if not preview_dir then
+    preview_dir = reaper.GetResourcePath() .. "/Data/FretboardController"
+    reaper.RecursiveCreateDirectory(preview_dir, 0)
   end
+  local path = preview_dir .. "/pv_" .. key .. ".mid"
+  local f = io.open(path, "rb")
+  if f then f:close() else
+    -- format 0, 960 tpqn, note on -> 2 QN (1 s at the default 120 bpm) -> note off
+    local trk = "\0" .. string.char(0x90 | ch, p, v) .. vlq(1920)
+             .. string.char(0x80 | ch, p, 0) .. "\0\255\47\0"
+    f = io.open(path, "wb")
+    if not f then return nil end
+    f:write("MThd", string.pack(">I4I2I2I2", 6, 0, 1, 960),
+            "MTrk", string.pack(">I4", #trk), trk)
+    f:close()
+  end
+  local src = reaper.PCM_Source_CreateFromFile(path)
+  preview_src[key] = src
+  return src
+end
+
+local function stop_preview(p, pv)
+  if pv == true then
+    reaper.StuffMIDIMessage(0, 0x80 + (S.chan - 1), p, 0)
+  elseif pv then
+    pcall(reaper.CF_Preview_Stop, pv)        -- no-op if it already finished
+  end
+end
+
+local function preview_off()
+  for p, pv in pairs(preview_notes) do stop_preview(p, pv) end
   preview_notes = {}
 end
 
 local preview_time = 0
 local function preview_on(p)
   if not chord_mode then preview_off() end   -- chord mode: let them ring together
-  reaper.StuffMIDIMessage(0, 0x90 + (S.chan - 1), p, S.vel)
-  preview_notes[p] = true
+  stop_preview(p, preview_notes[p])
+  local take = get_take()
+  local tr = take and track_of(take)
+  local pv
+  if HAS_CF_PREVIEW and tr then
+    local src = preview_source(S.chan - 1, p, S.vel)
+    pv = src and reaper.CF_CreatePreview(src)
+    if pv then
+      reaper.CF_Preview_SetOutputTrack(pv, 0, tr)
+      reaper.CF_Preview_Play(pv)
+    end
+  end
+  if not pv then
+    reaper.StuffMIDIMessage(0, 0x90 + (S.chan - 1), p, S.vel)
+    pv = true
+  end
+  preview_notes[p] = pv
   preview_time = reaper.time_precise()
 end
 
@@ -754,7 +814,7 @@ end
 
 local function monitor_hint(take)
   local tr = take and track_of(take)
-  if not tr then return "" end
+  if not tr or HAS_CF_PREVIEW then return "" end   -- CF_Preview needs no arming
   local arm = reaper.GetMediaTrackInfo_Value(tr, "I_RECARM") == 1
   local mon = reaper.GetMediaTrackInfo_Value(tr, "I_RECMON")
   if arm and mon > 0 then return "" end
@@ -1049,6 +1109,7 @@ end
 
 local function on_exit()
   preview_off()
+  for _, src in pairs(preview_src) do reaper.PCM_Source_Destroy(src) end
   local d, x, y, w, h = gfx.dock(-1, 0, 0, 0, 0)
   reaper.SetExtState(SECT, "wnd",
     string.format("%d,%d,%d,%d,%d", d or 0, x or 120, y or 120, w or 1040, h or 320), true)

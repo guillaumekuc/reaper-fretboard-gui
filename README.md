@@ -63,8 +63,9 @@ re-mapped):
 - Move the edit cursor in the MIDI editor to reposition; the script follows.
 - The board lights up: notes at the cursor (dim), notes you play on a MIDI
   keyboard (bright), notes under the play cursor during playback (bright).
-- Previews are audible only if the take's track is **armed + monitoring**
-  (same as keyboard step input); the panel says so when it isn't.
+- Previews play straight through the take's track FX (needs **SWS**; no
+  arming needed). Without SWS they go via the Virtual MIDI Keyboard, which
+  only sounds when the track is **armed + monitoring**; the panel says so.
 
 ## Install / use (JSFX version — `master`)
 
