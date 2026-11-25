@@ -136,6 +136,8 @@ local function load_state()
   S.num_frets   = clamp(math.floor(S.num_frets), 5, 30)
   S.ctx_mode    = clamp(math.floor(S.ctx_mode), 0, 2)
   S.accidental  = clamp(math.floor(S.accidental), 0, 1)
+  S.chan        = clamp(math.floor(S.chan), 1, 16)      -- 0 would break preview + insert
+  S.vel         = clamp(math.floor(S.vel), 1, 127)      -- 0 = a silent note-off
   S.active_string = clamp(math.floor(S.num_strings / 2) + 1, 1, S.num_strings)
 end
 
