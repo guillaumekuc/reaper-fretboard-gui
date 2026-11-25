@@ -59,7 +59,7 @@ function loop()
   -- on a new take: SetOnlyTrackSelected(its track) so VKB previews route there
   sync_cursor_from_edit(take) -- follow the user moving the edit cursor
 
-  scan_context(take)         -- every 6th frame (or every frame while playing)
+  scan_context(take)         -- when MIDI_GetHash / caret / grid / SHOW changes (every frame while playing)
   layout() ; draw_board() ; draw_panel() if open ; draw_strip() ; draw_toggle()
   handle_string_drag()       -- retune by dragging open-note labels
   handle_board_click()       -- the main event: preview + insert
@@ -223,6 +223,11 @@ note or mouse-release.
      routing needed. (Piano-roll *mouse* preview isn't hardware input, so it
      doesn't show.)
   3. **playback** notes straddling the play cursor → bright.
+  3b. **take notes at the caret** (start in `caret_window`: `[cursor, cursor +
+     grid)`) → white. Clicking one calls `remove_at_caret`, which deletes every
+     note of that pitch starting there (one undo point) and drops matching
+     `history` entries, instead of inserting. This keeps the board and the
+     MIDI editor in sync both ways.
   4. **take notes in the context window** (`scan_context`) → dim grey. The
      window is `context_window(take)`: `S.ctx_mode` 0 = the current **beat**
      (`floor(beats)`…`+1` via `TimeMap2_timeToBeats`/`beatsToTime`), 1 =
@@ -230,7 +235,9 @@ note or mouse-release.
      note counts if it overlaps `[lo_ppq, hi_ppq)`. The strip's
      `SHOW: Beat / Beat+ / Bar` buttons set it. (v0.4 drew *every* note in the
      take — that read as noise / fake inlays.)
-  `scan_context` is throttled to every 6th frame unless playing.
+  `scan_context` reruns whenever the take's `MIDI_GetHash`, the caret, the
+  grid or `S.ctx_mode` changes (so edits made in the MIDI editor show up at
+  once), and every frame while playing.
 
 ### Let ring (`L`)
 

@@ -83,6 +83,9 @@ row of note-icon buttons (1/32 → whole, fastest first) that jump the
 MIDI-editor note length straight to that value. A `CHORD` badge sits over the
 board whenever chord mode is on.
 
+Notes already in the take at the caret are drawn **white**; click one to
+remove it from the MIDI. The SHOW window around it stays grey.
+
 Click **settings** (top-right) to open the control panel below the strip;
 **hide** to collapse it. The panel holds everything else — tuning preset,
 string count (3–9), fret count (5–30, default 22), velocity, **GRID / NOTE**

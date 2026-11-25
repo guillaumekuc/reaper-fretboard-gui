@@ -1,6 +1,6 @@
 --[[
   Fretboard MIDI Controller  (ReaScript / Lua)
-  version 0.9.10-dbg
+  version 0.9.12-dbg
 
   A guitar-fretboard window that inserts notes into the take open in the active
   MIDI editor, Guitar-Pro-style: pick a string, type a fret, it writes the note
@@ -26,6 +26,7 @@
     ctrl+Z / Y     undo / redo
     space          transport play/stop
     shift+click    insert without advancing (chord entry)
+    click a WHITE note   remove it (white = notes in the take at the caret)
 
   Grid and note length are REAPER's own MIDI-editor settings. The [ ] and
   shift+[ shift+] keys (and the panel NOTE / GRID +/- buttons) step through
@@ -42,6 +43,7 @@
 local SECT = "GK_FretboardController"
 local MAX_STRINGS = 9
 local HAS_INPUT_POLL = reaper.MIDI_GetRecentInputEvent ~= nil
+local HAS_HASH       = reaper.MIDI_GetHash ~= nil
 local MIDI_SECTION  = 32060   -- MIDI editor action section
 
 -- ============================================================= model =====
@@ -541,12 +543,21 @@ local function context_window(take)
          reaper.MIDI_GetPPQPosFromProjQN(take, reaper.TimeMap2_timeToQN(0, hi_t))
 end
 
--- notes in the take in the context window / under the play cursor
+-- PPQ window of notes "at the caret": starting within one grid step of it.
+-- These are drawn white and a click on one removes it from the take.
+local function caret_window(take)
+  if not cursor_qn then return nil end
+  return reaper.MIDI_GetPPQPosFromProjQN(take, cursor_qn) - 0.5,
+         reaper.MIDI_GetPPQPosFromProjQN(take, cursor_qn + grid_qn(take)) - 0.5
+end
+
+-- notes in the take in the context window / at the caret / under the play cursor
 local function scan_context(take)
-  local at_cursor, playing = {}, {}
-  if not take then return at_cursor, playing end
+  local at_cursor, at_caret, playing = {}, {}, {}
+  if not take then return at_cursor, at_caret, playing end
   local _, notes = reaper.MIDI_CountEvts(take)
   local lo_ppq, hi_ppq = context_window(take)
+  local clo, chi = caret_window(take)
   local play_ppq
   if (reaper.GetPlayState() & 1) == 1 then
     play_ppq = reaper.MIDI_GetPPQPosFromProjTime(take, reaper.GetPlayPosition())
@@ -555,10 +566,39 @@ local function scan_context(take)
     local ok, _, muted, sppq, eppq, _, pitch = reaper.MIDI_GetNote(take, i)
     if ok and not muted then
       if lo_ppq and sppq < hi_ppq and eppq > lo_ppq then at_cursor[pitch] = true end
+      if clo and sppq >= clo and sppq < chi then at_caret[pitch] = true end
       if play_ppq and sppq <= play_ppq and eppq > play_ppq then playing[pitch] = true end
     end
   end
-  return at_cursor, playing
+  return at_cursor, at_caret, playing
+end
+
+local CTX_at_cursor, CTX_at_caret, CTX_playing = {}, {}, {}
+local ctx_key                -- what the last scan was taken against; nil = rescan
+
+-- delete every (unmuted) note of `pitch` starting at the caret
+local function remove_at_caret(take, pitch)
+  local clo, chi = caret_window(take)
+  if not clo then return end
+  reaper.Undo_BeginBlock()
+  local _, n = reaper.MIDI_CountEvts(take)
+  for i = n - 1, 0, -1 do
+    local ok, _, muted, sppq, _, _, p = reaper.MIDI_GetNote(take, i)
+    if ok and not muted and p == pitch and sppq >= clo and sppq < chi then
+      reaper.MIDI_DeleteNote(take, i)
+    end
+  end
+  reaper.MIDI_Sort(take)
+  mark_dirty(take)
+  reaper.Undo_EndBlock("Fretboard: remove " .. note_name(pitch) .. octave(pitch), -1)
+  reaper.UpdateArrange()
+  for i = #history, 1, -1 do                  -- so backspace doesn't step back over it
+    local h = history[i]
+    if h.take == take and h.pitch == pitch and h.sppq >= clo and h.sppq < chi then
+      table.remove(history, i)
+    end
+  end
+  ctx_key = nil
 end
 
 -- live MIDI from any hardware input (REAPER 7+)
@@ -690,7 +730,7 @@ local function layout()
   ir = math.max(3, nr * 0.55)
 end
 
-local function draw_board(at_cursor, playing)
+local function draw_board(at_cursor, at_caret, playing)
   gfx.set(0.11, 0.11, 0.12); gfx.rect(0, 0, gfx.w, gfx.h)
   gfx.set(0.16, 0.16, 0.17); gfx.rect(L, T, boardw, boardh)
 
@@ -785,7 +825,7 @@ local function draw_board(at_cursor, playing)
       local p = pitch_at(s, f)
       local prev = preview_notes[p]
       local live = live_notes[p]
-      local play = playing[p]
+      local play = playing[p] or at_caret[p]
       local here = at_cursor[p]
       if prev or live or play then
         gfx.set(1, 1, 1);           gfx.circle(note_x(f), y, nr + (prev and 1 or 0), 1, 1)
@@ -996,6 +1036,12 @@ local function handle_board_click()
   if p < 0 or p > 127 then return end
   S.active_string = bs
   digit_pending = nil
+  local take = get_take()
+  if take and CTX_at_caret[p] then              -- white note at the caret: click removes it
+    preview_off()
+    remove_at_caret(take, p)
+    return
+  end
   local advance = not chord_mode and (mouse.cap & 8) == 0   -- shift or chord mode: stack
   preview_on(p)
   insert_note(p, advance, bs)
@@ -1050,8 +1096,6 @@ end
 
 -- ============================================================= main ======
 
-local frame = 0
-local CTX_at_cursor, CTX_playing = {}, {}
 
 local function loop()
   local c = gfx.getchar()
@@ -1082,16 +1126,23 @@ local function loop()
   end
   S.active_string = clamp(S.active_string, 1, S.num_strings)
 
-  frame = frame + 1
+  -- keep the board in sync with the take: rescan whenever the MIDI, the caret,
+  -- the grid or the SHOW mode changes (and every frame while playing)
   local playing = take and ((reaper.GetPlayState() & 1) == 1)
-  if take and (playing or frame % 6 == 1) then
-    CTX_at_cursor, CTX_playing = scan_context(take)
-  elseif not take then
-    CTX_at_cursor, CTX_playing = {}, {}
+  if take then
+    local hash = HAS_HASH and select(2, reaper.MIDI_GetHash(take, true, "")) or reaper.time_precise()
+    local key = string.format("%s|%s|%s|%s|%s", tostring(take), hash,
+      tostring(cursor_qn), grid_qn(take), S.ctx_mode)
+    if playing or key ~= ctx_key then
+      CTX_at_cursor, CTX_at_caret, CTX_playing = scan_context(take)
+      ctx_key = key
+    end
+  else
+    CTX_at_cursor, CTX_at_caret, CTX_playing, ctx_key = {}, {}, {}, nil
   end
 
   layout()
-  draw_board(CTX_at_cursor, CTX_playing)
+  draw_board(CTX_at_cursor, CTX_at_caret, CTX_playing)
   if S.panel_open == 1 then draw_panel(take) end
   draw_strip(take)
   draw_toggle()
