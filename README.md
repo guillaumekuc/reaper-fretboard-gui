@@ -5,14 +5,14 @@ MIDI by clicking the board.
 
 Two implementations:
 
-| | `Fretboard.jsfx` (branch `master`) | `FretboardController.lua` (this branch) |
+| | `Fretboard.jsfx` | `FretboardController.lua` |
 |---|---|---|
 | Kind | JSFX effect, in a track's FX chain | ReaScript action |
 | Input target | live MIDI thru (record it) | **inserts notes into the MIDI editor take** (step-entry) |
 | Visualises | incoming live MIDI | notes already in the take |
 | Docs | `ARCHITECTURE.md` | `docs/REASCRIPT.md` |
 
-This branch (`reascript-step-input`) exists so clicking a fret can write a
+The ReaScript exists so clicking a fret can write a
 note straight into the piano roll — see `docs/REASCRIPT.md` for why the JSFX
 version can't and how the port works.
 
@@ -67,7 +67,7 @@ re-mapped):
   arming needed). Without SWS they go via the Virtual MIDI Keyboard, which
   only sounds when the track is **armed + monitoring**; the panel says so.
 
-## Install / use (JSFX version — `master`)
+## Install / use (JSFX version)
 
 Copy `Fretboard.jsfx` into `%APPDATA%\REAPER\Effects\`, add FX → JS →
 **Fretboard MIDI Controller** on a MIDI track. Incoming MIDI passes through
@@ -107,14 +107,13 @@ string 1 to transpose to any root.
 
 ## For developers
 
-- `docs/REASCRIPT.md` — orientation for `FretboardController.lua` (this
-  branch): the `defer` loop, the step cursor, MIDI-editor insertion, and what
+- `docs/REASCRIPT.md` — orientation for `FretboardController.lua`: the `defer` loop, the step cursor, MIDI-editor insertion, and what
   the port shares with / changes from the JSFX version.
-- `ARCHITECTURE.md` — orientation for the JSFX version (`master`).
+- `ARCHITECTURE.md` — orientation for the JSFX version.
 
 ## Status
 
-**ReaScript `v0.9.2` (this branch)** — fretboard window with Guitar-Pro-style
+**ReaScript `v0.9.2`** — fretboard window with Guitar-Pro-style
 typed entry (pick string, type fret) into the active MIDI editor take:
 Dorico-style chord mode (`Q`), rest, tie, let-ring, per-note undo/redo, bar
 navigation, and Dorico-style **decoupled grid vs note length** — both are
@@ -123,7 +122,7 @@ show per beat or per bar. Previews audibly; lights up cursor + live keyboard +
 playback. Passes a stubbed-API frame harness; not yet fully verified inside
 REAPER (the note-length setter API is unconfirmed — see `docs/REASCRIPT.md §7`).
 
-**JSFX `v0.3.0` (`master`)** — all settings in the plugin GUI, drag-to-retune,
+**JSFX `v0.3.0`** — all settings in the plugin GUI, drag-to-retune,
 greyscale UI. Live MIDI thru + click-to-send only (no editor insertion).
 
 ---

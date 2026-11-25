@@ -1,12 +1,12 @@
 # ReaScript architecture (`FretboardController.lua`)
 
-This branch (`reascript-step-input`) reworks the plugin from a **JSFX effect**
+The ReaScript reworks the plugin from a **JSFX effect**
 into a **ReaScript** so it can insert notes directly into the take open in the
 MIDI editor — the one thing the JSFX version structurally could not do
 (FX-chain MIDI output is not a step-input source).
 
-Read this before the code. The JSFX version and its `ARCHITECTURE.md` still
-live on `master` for comparison.
+Read this before the code. The JSFX version and its `ARCHITECTURE.md` are
+kept alongside for comparison.
 
 ---
 
